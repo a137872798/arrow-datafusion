@@ -21,7 +21,7 @@ use sqlparser::parser::ParserError;
 use std::result;
 use std::str::FromStr;
 
-/// Readable file compression type
+/// Readable file compression type  描述压缩类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompressionTypeVariant {
     /// Gzip-ed file

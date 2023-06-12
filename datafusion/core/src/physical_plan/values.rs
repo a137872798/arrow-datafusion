@@ -33,6 +33,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 /// Execution plan for values list based relation (produces constant rows)
+/// 对应一个物理计划
 #[derive(Debug)]
 pub struct ValuesExec {
     /// The schema
@@ -45,7 +46,7 @@ impl ValuesExec {
     /// create a new values exec from data as expr
     pub fn try_new(
         schema: SchemaRef,
-        data: Vec<Vec<Arc<dyn PhysicalExpr>>>,
+        data: Vec<Vec<Arc<dyn PhysicalExpr>>>,  // 二维 分别对应行和列
     ) -> Result<Self> {
         if data.is_empty() {
             return Err(DataFusionError::Plan("Values list cannot be empty".into()));
@@ -53,6 +54,7 @@ impl ValuesExec {
         let n_row = data.len();
         let n_col = schema.fields().len();
         // we have this single row, null, typed batch as a placeholder to satisfy evaluation argument
+        // 生成一个空结果集
         let batch = RecordBatch::try_new(
             schema.clone(),
             schema
@@ -65,6 +67,7 @@ impl ValuesExec {
             .map(|j| {
                 (0..n_row)
                     .map(|i| {
+                        // 对于Literal来说  batch是什么不重要  可以直接计算出结果
                         let r = data[i][j].evaluate(&batch);
                         match r {
                             Ok(ColumnarValue::Scalar(scalar)) => Ok(scalar),
@@ -83,6 +86,8 @@ impl ValuesExec {
                     .and_then(ScalarValue::iter_to_array)
             })
             .collect::<Result<Vec<_>>>()?;
+
+        // 基于expr调用evaluate得到的结果集
         let batch = RecordBatch::try_new(schema.clone(), arr)?;
         let data: Vec<RecordBatch> = vec![batch];
         Ok(Self { schema, data })
@@ -112,6 +117,7 @@ impl ExecutionPlan for ValuesExec {
         Partitioning::UnknownPartitioning(1)
     }
 
+    // 获取排序相关的表达式
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         None
     }
@@ -132,6 +138,7 @@ impl ExecutionPlan for ValuesExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         // GlobalLimitExec has a single output partition
+        // 该执行计划只有一个分区  分区号只能是0
         if 0 != partition {
             return Err(DataFusionError::Internal(format!(
                 "ValuesExec invalid partition {partition} (expected 0)"

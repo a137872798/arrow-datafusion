@@ -58,12 +58,14 @@ pub static TIMES: &[DataType] = &[
 
 /// Returns the coerced data type for each `input_types`.
 /// Different aggregate function with different input data type will get corresponding coerced data type.
+/// 修正参数类型
 pub fn coerce_types(
-    agg_fun: &AggregateFunction,
-    input_types: &[DataType],
-    signature: &Signature,
-) -> Result<Vec<DataType>> {
+    agg_fun: &AggregateFunction,  // 聚合函数
+    input_types: &[DataType],   // 输入的参数类型
+    signature: &Signature,   // 函数签名
+) -> Result<Vec<DataType>> {  // 返回的结果类型
     // Validate input_types matches (at least one of) the func signature.
+    // 先检测数量是否匹配
     check_arg_count(agg_fun, input_types, &signature.type_signature)?;
 
     match agg_fun {
@@ -71,11 +73,14 @@ pub fn coerce_types(
             Ok(input_types.to_vec())
         }
         AggregateFunction::ArrayAgg => Ok(input_types.to_vec()),
+        // 以上不需要修正
         AggregateFunction::Min | AggregateFunction::Max => {
             // min and max support the dictionary data type
             // unpack the dictionary to get the value
             get_min_max_result_type(input_types)
         }
+
+        // sum参数类型要支持累加
         AggregateFunction::Sum => {
             // Refer to https://www.postgresql.org/docs/8.2/functions-aggregate.html doc
             // smallint, int, bigint, real, double precision, decimal, or interval.
@@ -225,12 +230,14 @@ pub fn coerce_types(
 /// This method DOES NOT validate the argument types - only that (at least one,
 /// in the case of [`TypeSignature::OneOf`]) signature matches the desired
 /// number of input types.
+/// 检测参数数量是否匹配
 fn check_arg_count(
-    agg_fun: &AggregateFunction,
-    input_types: &[DataType],
-    signature: &TypeSignature,
+    agg_fun: &AggregateFunction,  // 聚合函数
+    input_types: &[DataType],   // 参数类型
+    signature: &TypeSignature,  // 函数签名
 ) -> Result<()> {
     match signature {
+        // 签名中包含数量信息 进行对别
         TypeSignature::Uniform(agg_count, _) | TypeSignature::Any(agg_count) => {
             if input_types.len() != *agg_count {
                 return Err(DataFusionError::Plan(format!(
@@ -241,6 +248,7 @@ fn check_arg_count(
                 )));
             }
         }
+        // 声明了参数类型的情况下 要求数量一致
         TypeSignature::Exact(types) => {
             if types.len() != input_types.len() {
                 return Err(DataFusionError::Plan(format!(
@@ -251,6 +259,7 @@ fn check_arg_count(
                 )));
             }
         }
+        // 由多个签名组成  每个都要check
         TypeSignature::OneOf(variants) => {
             let ok = variants
                 .iter()
@@ -296,6 +305,7 @@ fn get_min_max_result_type(input_types: &[DataType]) -> Result<Vec<DataType>> {
 }
 
 /// function return type of a sum
+/// 对sum结果类型做统一化处理
 pub fn sum_return_type(arg_type: &DataType) -> Result<DataType> {
     match arg_type {
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {

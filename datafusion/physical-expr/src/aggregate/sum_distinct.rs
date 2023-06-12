@@ -67,7 +67,7 @@ impl AggregateExpr for DistinctSum {
     }
 
     fn state_fields(&self) -> Result<Vec<Field>> {
-        // State field is a List which stores items to rebuild hash set.
+        // State field is a List which stores items to rebuild hash set.   因为需要去重计算sum 所以内部有什么元素是很重要的
         Ok(vec![Field::new_list(
             format_state_name(&self.name, "sum distinct"),
             Field::new("item", self.data_type.clone(), true),

@@ -23,11 +23,13 @@ use arrow_array::types::ByteArrayType;
 use arrow_array::{Array, ArrowPrimitiveType, GenericByteArray, PrimitiveArray};
 use std::cmp::Ordering;
 
-/// A [`Cursor`] for [`Rows`]
+/// A [`Cursor`] for [`Rows`]   行光标
 pub struct RowCursor {
+    // 当前在第几行 从0开始
     cur_row: usize,
+    // 总计多少行
     num_rows: usize,
-
+    // 多行记录构成的对象
     rows: Rows,
 }
 
@@ -76,7 +78,7 @@ impl Ord for RowCursor {
     }
 }
 
-/// A cursor into a sorted batch of rows
+/// A cursor into a sorted batch of rows  代表一个可以推进的光标  目前有2种光标  一种对应多个排序列组成的row 另一种对应单排序列
 pub trait Cursor: Ord {
     /// Returns true if there are no more rows in this cursor
     fn is_finished(&self) -> bool;
@@ -86,11 +88,14 @@ pub trait Cursor: Ord {
 }
 
 impl Cursor for RowCursor {
+
+    // 代表内存中的行记录都被消化完
     #[inline]
     fn is_finished(&self) -> bool {
         self.num_rows == self.cur_row
     }
 
+    // 推进读取下一行
     #[inline]
     fn advance(&mut self) -> usize {
         let t = self.cur_row;
@@ -106,7 +111,7 @@ pub trait FieldArray: Array + 'static {
     fn values(&self) -> Self::Values;
 }
 
-/// A comparable set of non-nullable values
+/// A comparable set of non-nullable values   描述字段数据  可以看作一个array
 pub trait FieldValues {
     type Value: ?Sized;
 
@@ -180,18 +185,24 @@ impl<T: ByteArrayType> FieldValues for GenericByteArray<T> {
 /// A cursor over sorted, nullable [`FieldValues`]
 ///
 /// Note: comparing cursors with different `SortOptions` will yield an arbitrary ordering
+/// 针对单排序列的 光标
 #[derive(Debug)]
 pub struct FieldCursor<T: FieldValues> {
+    // 对应排序列的数据
     values: T,
+    // 偏移量从0开始
     offset: usize,
     // If nulls first, the first non-null index
     // Otherwise, the first null index
+    // 根据nulls_first 该值的含义不同
     null_threshold: usize,
     options: SortOptions,
 }
 
 impl<T: FieldValues> FieldCursor<T> {
     /// Create a new [`FieldCursor`] from the provided `values` sorted according to `options`
+    /// options 描述如何排序
+    /// array 排序列数据
     pub fn new<A: FieldArray<Values = T>>(options: SortOptions, array: &A) -> Self {
         let null_threshold = match options.nulls_first {
             true => array.null_count(),
@@ -206,6 +217,7 @@ impl<T: FieldValues> FieldCursor<T> {
         }
     }
 
+    // 借助nulls_first和null_threshold 判断此时排序键值是否为null
     fn is_null(&self) -> bool {
         (self.offset < self.null_threshold) == self.options.nulls_first
     }
@@ -249,6 +261,7 @@ impl<T: FieldValues> Ord for FieldCursor<T> {
     }
 }
 
+// 针对单排序列的光标
 impl<T: FieldValues> Cursor for FieldCursor<T> {
     fn is_finished(&self) -> bool {
         self.offset == self.values.len()

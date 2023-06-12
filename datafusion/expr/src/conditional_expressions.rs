@@ -25,6 +25,7 @@ use std::collections::HashSet;
 /// Currently supported types by the coalesce function.
 /// The order of these types correspond to the order on which coercion applies
 /// This should thus be from least informative to most informative
+/// 支持合并的数据类型
 pub static SUPPORTED_COALESCE_TYPES: &[DataType] = &[
     DataType::Boolean,
     DataType::UInt8,
@@ -41,9 +42,13 @@ pub static SUPPORTED_COALESCE_TYPES: &[DataType] = &[
     DataType::LargeUtf8,
 ];
 
+
+/// TODO case 先忽略
+
 /// Helper struct for building [Expr::Case]
 pub struct CaseBuilder {
     expr: Option<Box<Expr>>,
+    // when 和 then是相对应的
     when_expr: Vec<Expr>,
     then_expr: Vec<Expr>,
     else_expr: Option<Box<Expr>>,
@@ -63,6 +68,7 @@ impl CaseBuilder {
             else_expr,
         }
     }
+
     pub fn when(&mut self, when: Expr, then: Expr) -> CaseBuilder {
         self.when_expr.push(when);
         self.then_expr.push(then);

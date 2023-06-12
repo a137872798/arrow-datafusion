@@ -32,7 +32,7 @@ use datafusion_common::cast::as_primitive_array;
 use datafusion_common::{cast::as_boolean_array, DataFusionError, Result, ScalarValue};
 use datafusion_expr::ColumnarValue;
 
-/// Not expression
+/// Not expression   对内部结果取反
 #[derive(Debug)]
 pub struct NotExpr {
     /// Input expression
@@ -140,6 +140,7 @@ impl PhysicalExpr for NotExpr {
         vec![self.arg.clone()]
     }
 
+    // 每个表达式都可以随时替换内部的child
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn PhysicalExpr>>,
@@ -179,6 +180,7 @@ macro_rules! expr_not {
 macro_rules! expr_array_not {
     ($ARRAY:expr, $PRIMITIVE_TY:ident) => {
         Ok(ColumnarValue::Array(Arc::new(
+            // 其实就是对每个元素调用 (!)
             arrow::compute::kernels::bitwise::bitwise_not(as_primitive_array::<
                 $PRIMITIVE_TY,
             >($ARRAY)?)?,

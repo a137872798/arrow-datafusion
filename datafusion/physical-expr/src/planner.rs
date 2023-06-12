@@ -42,11 +42,12 @@ use std::sync::Arc;
 ///                      to qualified or unqualified fields by name.
 /// * `input_schema` - The Arrow schema for the input, used for determining expression data types
 ///                    when performing type coercion.
+/// 产生一个物理expr
 pub fn create_physical_expr(
     e: &Expr,
     input_dfschema: &DFSchema,
     input_schema: &Schema,
-    execution_props: &ExecutionProps,
+    execution_props: &ExecutionProps,  // 一些辅助信息
 ) -> Result<Arc<dyn PhysicalExpr>> {
     if input_schema.fields.len() != input_dfschema.fields().len() {
         return Err(DataFusionError::Internal(format!(
@@ -57,6 +58,7 @@ pub fn create_physical_expr(
         )));
     }
     match e {
+        // 屏蔽了别名的影响吗
         Expr::Alias(expr, ..) => Ok(create_physical_expr(
             expr,
             input_dfschema,
@@ -67,11 +69,16 @@ pub fn create_physical_expr(
             let idx = input_dfschema.index_of_column(c)?;
             Ok(Arc::new(Column::new(&c.name, idx)))
         }
+        // 将标量包装成物理计划
         Expr::Literal(value) => Ok(Arc::new(Literal::new(value.clone()))),
+        // 对应一个标量类型 以及名字
         Expr::ScalarVariable(_, variable_names) => {
+            // @@ 开头的就是系统标量
             if is_system_variables(variable_names) {
+                // 从提供的变量中找到 系统变量
                 match execution_props.get_var_provider(VarType::System) {
                     Some(provider) => {
+                        // 获取系统标量 并包装成常量返回
                         let scalar_value = provider.get_value(variable_names.clone())?;
                         Ok(Arc::new(Literal::new(scalar_value)))
                     }
@@ -80,6 +87,7 @@ pub fn create_physical_expr(
                     )),
                 }
             } else {
+                // 同上 只是varType不同
                 match execution_props.get_var_provider(VarType::UserDefined) {
                     Some(provider) => {
                         let scalar_value = provider.get_value(variable_names.clone())?;
@@ -91,7 +99,9 @@ pub fn create_physical_expr(
                 }
             }
         }
+        // IsTrue 用于判断内部的表达式是否为true
         Expr::IsTrue(expr) => {
+            // 将本表达式 与 True进行合并  变成一个二元表达式
             let binary_op = binary_expr(
                 expr.as_ref().clone(),
                 Operator::IsNotDistinctFrom,
@@ -169,8 +179,12 @@ pub fn create_physical_expr(
                 execution_props,
             )
         }
+
+        // 以上都是一个套路 转变成BinaryExpr
+
         Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
             // Create physical expressions for left and right operands
+            // 分别处理左右
             let lhs = create_physical_expr(
                 left,
                 input_dfschema,
@@ -231,6 +245,7 @@ pub fn create_physical_expr(
                     rhs,
                     input_schema,
                 )?)),
+                // TODO 忽略时间表达式相关的
                 _ => {
                     // Note that the logical planner is responsible
                     // for type coercion on the arguments (e.g. if one
@@ -239,10 +254,13 @@ pub fn create_physical_expr(
                     //
                     // There should be no coercion during physical
                     // planning.
+                    // 包装成一个物理的二元表达式   TODO 细节不看了   只掌握主流程
                     binary(lhs, *op, rhs, input_schema)
                 }
             }
         }
+
+        // 对应like表达式
         Expr::Like(Like {
             negated,
             expr,
@@ -266,6 +284,8 @@ pub fn create_physical_expr(
                 input_schema,
                 execution_props,
             )?;
+
+            // 将内部转换成物理表达式后  外部套上一层like  具体的正则匹配逻辑在 arrow-string包下 先不看
             like(
                 *negated,
                 false,
@@ -305,6 +325,8 @@ pub fn create_physical_expr(
                 input_schema,
             )
         }
+
+        // case when
         Expr::Case(case) => {
             let expr: Option<Arc<dyn PhysicalExpr>> = if let Some(e) = &case.expr {
                 Some(create_physical_expr(
@@ -357,8 +379,12 @@ pub fn create_physical_expr(
                 } else {
                     None
                 };
+
+            // 就是分别转换内部表达式  并重新组合
             Ok(expressions::case(expr, when_then_expr, else_expr)?)
         }
+
+        // cast的逻辑由 arrow-cast实现
         Expr::Cast(Cast { expr, data_type }) => expressions::cast(
             create_physical_expr(expr, input_dfschema, input_schema, execution_props)?,
             input_schema,
@@ -379,6 +405,7 @@ pub fn create_physical_expr(
             create_physical_expr(expr, input_dfschema, input_schema, execution_props)?,
             input_schema,
         ),
+        // 将列值变成null位图
         Expr::IsNull(expr) => expressions::is_null(create_physical_expr(
             expr,
             input_dfschema,
@@ -391,6 +418,8 @@ pub fn create_physical_expr(
             input_schema,
             execution_props,
         )?),
+
+        // 一般内部的expr是一个复合类型 (list,struct)  通过key检索到复合结构中的某个值
         Expr::GetIndexedField(GetIndexedField { key, expr }) => {
             Ok(Arc::new(GetIndexedFieldExpr::new(
                 create_physical_expr(
@@ -403,6 +432,7 @@ pub fn create_physical_expr(
             )))
         }
 
+        // 该计划对应一个函数  将表达式作为参数  触发函数
         Expr::ScalarFunction { fun, args } => {
             let physical_args = args
                 .iter()
@@ -417,6 +447,8 @@ pub fn create_physical_expr(
                 execution_props,
             )
         }
+
+        // 跟上面差不多
         Expr::ScalarUDF { fun, args } => {
             let mut physical_args = vec![];
             for e in args {
@@ -455,6 +487,7 @@ pub fn create_physical_expr(
             )?;
 
             // rewrite the between into the two binary operators
+            // 多个二元表达式的叠加
             let binary_expr = binary(
                 binary(value_expr.clone(), Operator::GtEq, low_expr, input_schema)?,
                 Operator::And,

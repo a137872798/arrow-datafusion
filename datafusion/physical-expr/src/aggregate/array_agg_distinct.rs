@@ -32,7 +32,7 @@ use datafusion_common::Result;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Accumulator;
 
-/// Expression for a ARRAY_AGG(DISTINCT) aggregation.
+/// Expression for a ARRAY_AGG(DISTINCT) aggregation.   还是将数据存储到数组中 不同的是不包含已存在的数据
 #[derive(Debug)]
 pub struct DistinctArrayAgg {
     /// Column name
@@ -111,6 +111,7 @@ impl PartialEq<dyn Any> for DistinctArrayAgg {
 
 #[derive(Debug)]
 struct DistinctArrayAggAccumulator {
+    // 通过set替代vec存储数据 这样相同数据就不会保留了
     values: HashSet<ScalarValue>,
     datatype: DataType,
 }

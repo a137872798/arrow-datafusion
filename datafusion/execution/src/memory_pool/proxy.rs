@@ -36,6 +36,7 @@ impl<T> VecAllocExt for Vec<T> {
             // allocate more
 
             // growth factor: 2, but at least 2 elements
+            // 预留足够的空间
             let bump_elements = (self.capacity() * 2).max(2);
             let bump_size = std::mem::size_of::<u32>() * bump_elements;
             self.reserve(bump_elements);
@@ -60,6 +61,7 @@ pub trait RawTableAllocExt {
     ) -> Bucket<Self::T>;
 }
 
+// RawTable可以看做是一个hashMap
 impl<T> RawTableAllocExt for RawTable<T> {
     type T = T;
 
@@ -69,6 +71,8 @@ impl<T> RawTableAllocExt for RawTable<T> {
         hasher: impl Fn(&Self::T) -> u64,
         accounting: &mut usize,
     ) -> Bucket<Self::T> {
+
+        // 计算hash值
         let hash = hasher(&x);
 
         match self.try_insert_no_grow(hash, x) {
@@ -80,6 +84,7 @@ impl<T> RawTableAllocExt for RawTable<T> {
                 let bump_size = bump_elements * std::mem::size_of::<T>();
                 *accounting = (*accounting).checked_add(bump_size).expect("overflow");
 
+                // 扩容后插入
                 self.reserve(bump_elements, hasher);
 
                 // still need to insert the element since first try failed

@@ -27,6 +27,7 @@ use datafusion_expr::logical_plan::{EmptyRelation, LogicalPlan};
 
 /// Optimization rule that eliminate LIMIT 0 or useless LIMIT(skip:0, fetch:None).
 /// It can cooperate with `propagate_empty_relation` and `limit_push_down`.
+/// 擦除limit
 #[derive(Default)]
 pub struct EliminateLimit;
 
@@ -46,6 +47,7 @@ impl OptimizerRule for EliminateLimit {
         if let LogicalPlan::Limit(limit) = plan {
             match limit.fetch {
                 Some(fetch) => {
+                    // 如果limit是0 会返回空数据
                     if fetch == 0 {
                         return Ok(Some(LogicalPlan::EmptyRelation(EmptyRelation {
                             produce_one_row: false,

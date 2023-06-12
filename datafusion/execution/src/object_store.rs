@@ -27,6 +27,7 @@ use std::sync::Arc;
 use url::Url;
 
 /// A parsed URL identifying a particular [`ObjectStore`]
+/// 用于与对象存储通信
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectStoreUrl {
     url: Url,
@@ -38,6 +39,7 @@ impl ObjectStoreUrl {
         let mut parsed =
             Url::parse(s.as_ref()).map_err(|e| DataFusionError::External(Box::new(e)))?;
 
+        // 去掉前缀
         let remaining = &parsed[url::Position::BeforePath..];
         if !remaining.is_empty() && remaining != "/" {
             return Err(DataFusionError::Execution(format!(
@@ -118,6 +120,7 @@ impl std::fmt::Display for ObjectStoreUrl {
 /// lazily by providing a custom implementation of [`ObjectStoreRegistry`]
 ///
 /// [`ListingTableUrl`]: crate::datasource::listing::ListingTableUrl
+/// 注册ObjectStore
 pub trait ObjectStoreRegistry: Send + Sync + std::fmt::Debug + 'static {
     /// If a store with the same key existed before, it is replaced and returned
     fn register_store(

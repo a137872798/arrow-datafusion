@@ -48,9 +48,12 @@ use std::{
 use parking_lot::Mutex;
 
 /// Create `n` empty channels.
+/// 创建n组管道    只有刚所有channel都有数据时  发送者会被阻塞  当至少有一个channel空出来时 sender又可以继续发送数据  不涉及任务窃取 这样设计的目的？
 pub fn channels<T>(
     n: usize,
 ) -> (Vec<DistributionSender<T>>, Vec<DistributionReceiver<T>>) {
+
+    // 创建等量的channel  每个channel支持多生产者单消费者 默认生产者为1个
     let channels = (0..n)
         .map(|id| {
             Arc::new(Mutex::new(Channel {
@@ -62,10 +65,14 @@ pub fn channels<T>(
             }))
         })
         .collect::<Vec<_>>();
+
+    // 创建gate对象  通过该对象来通知上游继续发送数据
     let gate = Arc::new(Mutex::new(Gate {
         empty_channels: n,
         send_wakers: Vec::default(),
     }));
+、
+    // 根据channel数量 创建等量的sender/receiver
     let senders = channels
         .iter()
         .map(|channel| DistributionSender {
@@ -119,6 +126,7 @@ impl<T> DistributionSender<T> {
     /// Send data.
     ///
     /// This fails if the [receiver](DistributionReceiver) is gone.
+    /// 当发送数据时会产生一个future对象
     pub fn send(&self, element: T) -> SendFuture<'_, T> {
         SendFuture {
             channel: &self.channel,
@@ -131,6 +139,7 @@ impl<T> DistributionSender<T> {
 impl<T> Clone for DistributionSender<T> {
     fn clone(&self) -> Self {
         let mut guard = self.channel.lock();
+        // 当sender被拷贝时  对应的发送者数量+1
         guard.n_senders += 1;
 
         Self {
@@ -143,23 +152,28 @@ impl<T> Clone for DistributionSender<T> {
 impl<T> Drop for DistributionSender<T> {
     fn drop(&mut self) {
         let mut guard_channel = self.channel.lock();
+        // 对象释放时  关联channel的发送者数量-1
         guard_channel.n_senders -= 1;
 
+        // 本来发送者和管道的关系是11对应 通过clone可以增加持有管道的发送者 这里释放发送者后 管道不再被使用 就可以释放了
         if guard_channel.n_senders == 0 {
             // Note: the recv_alive check is so that we don't double-clear the status
             if guard_channel.data.is_empty() && guard_channel.recv_alive {
                 // channel is gone, so we need to clear our signal
                 let mut guard_gate = self.gate.lock();
+                // 本管道从可以到被销毁 那么可用的(empty_channels) 管道就会减少  注意！要求data为empty
                 guard_gate.empty_channels -= 1;
             }
 
             // receiver may be waiting for data, but should return `None` now since the channel is closed
+            // 唤醒阻塞在该管道上的所有接收者
             guard_channel.wake_receivers();
         }
     }
 }
 
 /// Future backing [send](DistributionSender::send).
+/// 发送的数据 以及相关的属性都绑定在该对象上
 #[derive(Debug)]
 pub struct SendFuture<'a, T> {
     channel: &'a SharedChannel<T>,
@@ -171,6 +185,7 @@ pub struct SendFuture<'a, T> {
 impl<'a, T> Future for SendFuture<'a, T> {
     type Output = Result<(), SendError<T>>;
 
+    // 调用发送者的send时 只是产生了一个future对象 还需要调用poll才会真正发送数据
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
         assert!(this.element.is_some(), "polled ready future");
@@ -178,6 +193,7 @@ impl<'a, T> Future for SendFuture<'a, T> {
         let mut guard_channel = this.channel.lock();
 
         // receiver end still alive?
+        // 如果关联的channel 没有接收者 也就没有发送数据的必要了
         if !guard_channel.recv_alive {
             return Poll::Ready(Err(SendError(
                 this.element.take().expect("just checked"),
@@ -187,7 +203,7 @@ impl<'a, T> Future for SendFuture<'a, T> {
         let mut guard_gate = this.gate.lock();
 
         // does ANY receiver need data?
-        // if so, allow sender to create another
+        // if so, allow sender to create another   如果所有管道都还有未消化的数据 数据包进入阻塞状态
         if guard_gate.empty_channels == 0 {
             guard_gate
                 .send_wakers
@@ -195,10 +211,13 @@ impl<'a, T> Future for SendFuture<'a, T> {
             return Poll::Pending;
         }
 
+        // 数据包插入到channel中
         let was_empty = guard_channel.data.is_empty();
         guard_channel
             .data
             .push_back(this.element.take().expect("just checked"));
+
+        // 代表该数据包是此时channel唯一的包 唤醒接收者
         if was_empty {
             guard_gate.empty_channels -= 1;
             guard_channel.wake_receivers();
@@ -229,21 +248,28 @@ impl<T> DistributionReceiver<T> {
 }
 
 impl<T> Drop for DistributionReceiver<T> {
+
+    // 释放接收者
     fn drop(&mut self) {
         let mut guard_channel = self.channel.lock();
         let mut guard_gate = self.gate.lock();
+
+        // 此时该管道上已经没有接收者了
         guard_channel.recv_alive = false;
 
         // Note: n_senders check is here so we don't double-clear the signal
+        // (guard_channel.n_senders > 0)
+        // n_senders 为0的话 已经减过一次了
         if guard_channel.data.is_empty() && (guard_channel.n_senders > 0) {
             // channel is gone, so we need to clear our signal
             guard_gate.empty_channels -= 1;
         }
 
         // senders may be waiting for gate to open but should error now that the channel is closed
+        // 接收者已经无用了 要通知到发送者
         guard_gate.wake_channel_senders(guard_channel.id);
 
-        // clear potential remaining data from channel
+        // clear potential remaining data from channel  管道关联的数据也可以丢弃了
         guard_channel.data.clear();
     }
 }
@@ -260,13 +286,17 @@ impl<'a, T> Future for RecvFuture<'a, T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
+        // rdy避免重复调用poll
         assert!(!this.rdy, "polled ready future");
 
         let mut guard_channel = this.channel.lock();
 
         match guard_channel.data.pop_front() {
+
+            // 拿到数据了
             Some(element) => {
                 // change "empty" signal for this channel?
+                // 拿走数据后 此时管道没有其他数据了
                 if guard_channel.data.is_empty() && (guard_channel.n_senders > 0) {
                     let mut guard_gate = this.gate.lock();
 
@@ -274,7 +304,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
                     let old_counter = guard_gate.empty_channels;
                     guard_gate.empty_channels += 1;
 
-                    // open gate?
+                    // open gate?  所有管道都有数据的时候 empty_channels为0 然后之后的发送者都会被阻塞 所以从0到1时 就可以唤醒之前所有的发送者了
                     if old_counter == 0 {
                         guard_gate.wake_all_senders();
                     }
@@ -286,10 +316,13 @@ impl<'a, T> Future for RecvFuture<'a, T> {
                 this.rdy = true;
                 Poll::Ready(Some(element))
             }
+
+            // 代表管道已经弃用了 返回None
             None if guard_channel.n_senders == 0 => {
                 this.rdy = true;
                 Poll::Ready(None)
             }
+            // 此时没数据 等待
             None => {
                 guard_channel.recv_wakers.push(cx.waker().clone());
                 Poll::Pending
@@ -298,22 +331,23 @@ impl<'a, T> Future for RecvFuture<'a, T> {
     }
 }
 
-/// Links senders and receivers.
+/// Links senders and receivers.  单个管道 连接sender/receiver
 #[derive(Debug)]
 struct Channel<T> {
-    /// Buffered data.
+    /// Buffered data.  存储数据的队列
     data: VecDeque<T>,
 
     /// Reference counter for the sender side.
     n_senders: usize,
 
-    /// Reference "counter"/flag for the single receiver.
+    /// Reference "counter"/flag for the single receiver.  代表该管道上还有接收者
     recv_alive: bool,
 
     /// Wakers for the receiver side.
     ///
     /// The receiver will be pending if the [buffer](Self::data) is empty and
     /// there are senders left (according to the [reference counter](Self::n_senders)).
+    /// 每个接收者对应一个Waker
     recv_wakers: Vec<Waker>,
 
     /// Channel ID.
@@ -335,13 +369,13 @@ impl<T> Channel<T> {
 /// One or multiple senders and a single receiver will share a channel.
 type SharedChannel<T> = Arc<Mutex<Channel<T>>>;
 
-/// The "all channels have data" gate.
+/// The "all channels have data" gate.    管理所有管道
 #[derive(Debug)]
 struct Gate {
-    /// Number of currently empty (and still open) channels.
+    /// Number of currently empty (and still open) channels.  最大数量等同于创建的管道组
     empty_channels: usize,
 
-    /// Wakers for the sender side, including their channel IDs.
+    /// Wakers for the sender side, including their channel IDs.   通知发送方可以继续发送数据了
     send_wakers: Vec<(Waker, usize)>,
 }
 
@@ -358,8 +392,10 @@ impl Gate {
     /// Wake senders for a specific channel.
     ///
     /// This is helpful to signal that the receiver side is gone and the senders shall now error.
+    /// 当某个channel不再可用时 通知上游sender 就是通过该方法  唤醒部分sender？  这是什么设计啊
     fn wake_channel_senders(&mut self, id: usize) {
         // `drain_filter` is unstable, so implement our own
+        // 因为sender可以clone 与channel是多对一的关系
         let (wake, keep) = self
             .send_wakers
             .drain(..)

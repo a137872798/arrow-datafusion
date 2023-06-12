@@ -50,6 +50,7 @@ use futures::StreamExt;
 /// Get all files as well as the file level summary statistics (no statistic for partition columns).
 /// If the optional `limit` is provided, includes only sufficient files.
 /// Needed to read up to `limit` number of rows.
+/// 根据limit 将数据文件存储到result中 并且基于这些数据文件进行统计
 pub async fn get_statistics_with_limit(
     all_files: impl Stream<Item = Result<(PartitionedFile, Statistics)>>,
     file_schema: SchemaRef,
@@ -59,6 +60,8 @@ pub async fn get_statistics_with_limit(
 
     let mut null_counts = vec![0; file_schema.fields().len()];
     let mut has_statistics = false;
+
+    // 产生max/min累加器
     let (mut max_values, mut min_values) = create_max_min_accs(&file_schema);
 
     let mut is_exact = true;
@@ -72,26 +75,36 @@ pub async fn get_statistics_with_limit(
 
     // fusing the stream allows us to call next safely even once it is finished
     let mut all_files = Box::pin(all_files.fuse());
+
+    // 开始遍历每个数据文件
     while let Some(res) = all_files.next().await {
         let (file, file_stats) = res?;
         result_files.push(file);
         is_exact &= file_stats.is_exact;
+
+        // 不断累加读取的行数
         num_rows = if let Some(num_rows) = num_rows {
             Some(num_rows + file_stats.num_rows.unwrap_or(0))
         } else {
             file_stats.num_rows
         };
+
+        // 总字节数
         total_byte_size = if let Some(total_byte_size) = total_byte_size {
             Some(total_byte_size + file_stats.total_byte_size.unwrap_or(0))
         } else {
             file_stats.total_byte_size
         };
+
+        // 获取每列的统计数据
         if let Some(vec) = &file_stats.column_statistics {
             has_statistics = true;
             for (i, cs) in vec.iter().enumerate() {
+                // 记录每列null的数量
                 null_counts[i] += cs.null_count.unwrap_or(0);
 
                 if let Some(max_value) = &mut max_values[i] {
+                    // 更新最大值
                     if let Some(file_max) = cs.max_value.clone() {
                         match max_value.update_batch(&[file_max.to_array()]) {
                             Ok(_) => {}
@@ -123,6 +136,7 @@ pub async fn get_statistics_with_limit(
         // files. This only applies when we know the number of rows. It also
         // currently ignores tables that have no statistics regarding the
         // number of rows.
+        // 当超过limit数量时  返回
         if num_rows.unwrap_or(usize::MIN) > limit.unwrap_or(usize::MAX) {
             break;
         }
@@ -130,11 +144,13 @@ pub async fn get_statistics_with_limit(
     // if we still have files in the stream, it means that the limit kicked
     // in and that the statistic could have been different if we processed
     // the files in a different order.
+    // 因为此时没有读取所有文件 所以统计数据是不精确的
     if all_files.next().await.is_some() {
         is_exact = false;
     }
 
     let column_stats = if has_statistics {
+        // 生成列的统计数据
         Some(get_col_stats(
             &file_schema,
             null_counts,
@@ -145,6 +161,7 @@ pub async fn get_statistics_with_limit(
         None
     };
 
+    // 生成统计对象
     let statistics = Statistics {
         num_rows,
         total_byte_size,
@@ -155,6 +172,7 @@ pub async fn get_statistics_with_limit(
     Ok((result_files, statistics))
 }
 
+// 产生累加器
 fn create_max_min_accs(
     schema: &Schema,
 ) -> (Vec<Option<MaxAccumulator>>, Vec<Option<MinAccumulator>>) {

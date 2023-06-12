@@ -23,14 +23,18 @@ use sqlparser::ast::TableFactor;
 mod join;
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 抛开复杂的情况 简单理解就是这里会将针对某个表的子查询包装成一个执行计划
     fn create_relation(
         &self,
         relation: TableFactor,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let (plan, alias) = match relation {
+            // 代表引用了另一个表
             TableFactor::Table { name, alias, .. } => {
                 // normalize name and alias
+                // 对表名进行规范化解析
                 let table_ref = self.object_name_to_table_reference(name)?;
                 let table_name = table_ref.to_string();
                 let cte = planner_context.get_cte(&table_name);
@@ -39,7 +43,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                         cte,
                         self.schema_provider.get_table_provider(table_ref.clone()),
                     ) {
+                        // 这个应该是理解为复用cte的计划
                         (Some(cte_plan), _) => Ok(cte_plan.clone()),
+                        // 对另一个表的引用 变成了一个查询计划
                         (_, Ok(provider)) => {
                             LogicalPlanBuilder::scan(table_ref, provider, None)?.build()
                         }
@@ -48,6 +54,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     alias,
                 )
             }
+
+            // TODO
             TableFactor::Derived {
                 subquery, alias, ..
             } => {
@@ -58,6 +66,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 table_with_joins,
                 alias,
             } => (
+                // 内部表也允许是join形成的临时表
                 self.plan_table_with_joins(*table_with_joins, planner_context)?,
                 alias,
             ),
@@ -68,6 +77,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 )));
             }
         };
+
+        // 这是表级别的别名
         if let Some(alias) = alias {
             self.apply_table_alias(plan, alias)
         } else {

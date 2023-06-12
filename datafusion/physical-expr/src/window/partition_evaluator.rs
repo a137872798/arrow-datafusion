@@ -25,14 +25,14 @@ use datafusion_common::{DataFusionError, ScalarValue};
 use std::fmt::Debug;
 use std::ops::Range;
 
-/// Partition evaluator
+/// Partition evaluator  用于评估分区的对象
 pub trait PartitionEvaluator: Debug + Send {
     /// Whether the evaluator should be evaluated with rank
     fn include_rank(&self) -> bool {
         false
     }
 
-    /// Returns state of the Built-in Window Function
+    /// Returns state of the Built-in Window Function  返回内置函数的状态
     fn state(&self) -> Result<BuiltinWindowState> {
         // If we do not use state we just return Default
         Ok(BuiltinWindowState::Default)
@@ -42,7 +42,7 @@ pub trait PartitionEvaluator: Debug + Send {
     // state is useful to update internal state for Built-in window function.
     // idx is the index of last row for which result is calculated.
     // range_columns is the result of order by column values. It is used to calculate rank boundaries
-    // sort_partition_points is the boundaries of each rank in the range_column. It is used to update rank.
+    // sort_partition_points is the boundaries of each rank in the range_column. It is used to update rank.  更新状态
     fn update_state(
         &mut self,
         _state: &WindowAggState,

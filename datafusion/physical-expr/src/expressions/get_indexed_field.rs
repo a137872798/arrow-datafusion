@@ -40,7 +40,9 @@ use std::{any::Any, sync::Arc};
 /// expression to get a field of a struct array.
 #[derive(Debug)]
 pub struct GetIndexedFieldExpr {
+    // 对应某个List/Struct结果集
     arg: Arc<dyn PhysicalExpr>,
+    // 通过key从arg中选择结果
     key: ScalarValue,
 }
 
@@ -82,13 +84,18 @@ impl PhysicalExpr for GetIndexedFieldExpr {
         get_data_type_field(&data_type, &self.key).map(|f| f.is_nullable())
     }
 
+    // 取出单一结果列
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         let array = self.arg.evaluate(batch)?.into_array(1);
         match (array.data_type(), &self.key) {
+
+            // key为空 返回全部数据
             (DataType::List(_) | DataType::Struct(_), _) if self.key.is_null() => {
                 let scalar_null: ScalarValue = array.data_type().try_into()?;
                 Ok(ColumnarValue::Scalar(scalar_null))
             }
+
+            // 支持从list中根据int检索
             (DataType::List(lst), ScalarValue::Int64(Some(i))) => {
                 let as_list_array = as_list_array(&array)?;
 
@@ -97,6 +104,7 @@ impl PhysicalExpr for GetIndexedFieldExpr {
                     return Ok(ColumnarValue::Scalar(scalar_null))
                 }
 
+                // DataType::List 的每个值都是一个list  相当于取出每个list对应下标的值
                 let sliced_array: Vec<Arc<dyn Array>> = as_list_array
                     .iter()
                     .filter_map(|o| match o {
@@ -140,6 +148,7 @@ impl PhysicalExpr for GetIndexedFieldExpr {
         }
     }
 
+    // 返回内部先要执行的子计划
     fn children(&self) -> Vec<Arc<dyn PhysicalExpr>> {
         vec![self.arg.clone()]
     }

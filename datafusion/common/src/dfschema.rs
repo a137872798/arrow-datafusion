@@ -37,9 +37,9 @@ pub type DFSchemaRef = Arc<DFSchema>;
 /// DFSchema wraps an Arrow schema and adds relation names
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DFSchema {
-    /// Fields
+    /// Fields   TableReference + arrow field 就是DFField
     fields: Vec<DFField>,
-    /// Additional metadata in form of key value pairs
+    /// Additional metadata in form of key value pairs    表级别的元数据
     metadata: HashMap<String, String>,
 }
 
@@ -66,6 +66,7 @@ impl DFSchema {
         let mut qualified_names = HashSet::new();
         let mut unqualified_names = HashSet::new();
 
+        // 这个相当于是校验 确保fields描述的列都是不同的
         for field in &fields {
             if let Some(qualifier) = field.qualifier() {
                 if !qualified_names.insert((qualifier, field.name())) {
@@ -109,6 +110,7 @@ impl DFSchema {
     }
 
     /// Create a `DFSchema` from an Arrow schema and a given qualifier
+    /// 更改了field绑定的表信息
     pub fn try_from_qualified_schema<'a>(
         qualifier: impl Into<TableReference<'a>>,
         schema: &Schema,
@@ -117,7 +119,7 @@ impl DFSchema {
         Self::new_with_metadata(
             schema
                 .fields()
-                .iter()
+                .iter()  // 将arrow的field包装成 arrow-datafusion的field  相比就是多个TableReference
                 .map(|f| DFField::from_qualified(qualifier.clone(), f.clone()))
                 .collect(),
             schema.metadata().clone(),
@@ -126,6 +128,7 @@ impl DFSchema {
 
     /// Create a new schema that contains the fields from this schema followed by the fields
     /// from the supplied schema. An error will be returned if there are duplicate field names.
+    /// 将2个schema合并
     pub fn join(&self, schema: &DFSchema) -> Result<Self> {
         let mut fields = self.fields.clone();
         let mut metadata = self.metadata.clone();
@@ -136,6 +139,7 @@ impl DFSchema {
 
     /// Modify this schema by appending the fields from the supplied schema, ignoring any
     /// duplicate fields.
+    /// 将2个schema信息进行合并
     pub fn merge(&mut self, other_schema: &DFSchema) {
         if other_schema.fields.is_empty() {
             return;
@@ -167,6 +171,7 @@ impl DFSchema {
 
     #[deprecated(since = "8.0.0", note = "please use `index_of_column_by_name` instead")]
     /// Find the index of the column with the given unqualified name
+    /// 通过名称检索
     pub fn index_of(&self, name: &str) -> Result<usize> {
         for i in 0..self.fields.len() {
             if self.fields[i].name() == name {
@@ -174,6 +179,7 @@ impl DFSchema {
             } else {
                 // Now that `index_of` is deprecated an error is thrown if
                 // a fully qualified field name is provided.
+                // 直接匹配不行的话 就增加标识符
                 match &self.fields[i].qualifier {
                     Some(qualifier) => {
                         if (qualifier.to_string() + "." + self.fields[i].name()) == name {
@@ -191,6 +197,7 @@ impl DFSchema {
         Err(unqualified_field_not_found(name, self))
     }
 
+    // 通过名称检索下标
     pub fn index_of_column_by_name(
         &self,
         qualifier: Option<&TableReference>,
@@ -207,10 +214,10 @@ impl DFSchema {
                 (Some(q), Some(field_q)) => {
                     q.resolved_eq(field_q) && field.name() == name
                 }
-                // field to lookup is qualified but current field is unqualified.
+                // field to lookup is qualified but current field is unqualified.  代表field上没有table信息
                 (Some(qq), None) => {
                     // the original field may now be aliased with a name that matches the
-                    // original qualified name
+                    // original qualified name  尝试从field上解析
                     let column = Column::from_qualified_name(field.name());
                     match column {
                         Column {
@@ -221,6 +228,7 @@ impl DFSchema {
                     }
                 }
                 // field to lookup is unqualified, no need to compare qualifier
+                // 都没有table信息 直接比较列
                 (None, Some(_)) | (None, None) => field.name() == name,
             })
             .map(|(idx, _)| idx);
@@ -252,7 +260,7 @@ impl DFSchema {
             .map(|idx| idx.is_some())
     }
 
-    /// Find the field with the given name
+    /// Find the field with the given name  通过名称查找字段
     pub fn field_with_name(
         &self,
         qualifier: Option<&TableReference>,
@@ -369,7 +377,7 @@ impl DFSchema {
             .all(|(dffield, arrowfield)| dffield.name() == arrowfield.name())
     }
 
-    /// Check to see if fields in 2 Arrow schemas are compatible
+    /// Check to see if fields in 2 Arrow schemas are compatible  检查该schema能否转换成arrow的类型
     pub fn check_arrow_schema_type_compatible(
         &self,
         arrow_schema: &Schema,
@@ -415,6 +423,7 @@ impl DFSchema {
     /// name and type), ignoring both metadata and nullability.
     ///
     /// request to upstream: <https://github.com/apache/arrow-rs/issues/3199>
+    /// 判断2者的数据类型是否在语义上兼容
     fn datatype_is_semantically_equal(dt1: &DataType, dt2: &DataType) -> bool {
         // check nested fields
         match (dt1, dt2) {
@@ -601,6 +610,7 @@ impl Display for DFSchema {
 ///
 /// Note that this trait is implemented for &[DFSchema] which is
 /// widely used in the DataFusion codebase.
+/// 实际上通过 DFSchema内部的属性来判断
 pub trait ExprSchema {
     /// Is this column reference nullable?
     fn nullable(&self, col: &Column) -> Result<bool>;
@@ -622,6 +632,7 @@ impl<P: AsRef<DFSchema>> ExprSchema for P {
 
 impl ExprSchema for DFSchema {
     fn nullable(&self, col: &Column) -> Result<bool> {
+        // 通过遍历schema内部的field 来判断是否满足条件
         Ok(self.field_from_column(col)?.is_nullable())
     }
 
@@ -633,9 +644,9 @@ impl ExprSchema for DFSchema {
 /// DFField wraps an Arrow field and adds an optional qualifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DFField {
-    /// Optional qualifier (usually a table or relation name)
+    /// Optional qualifier (usually a table or relation name)   列属于哪个表
     qualifier: Option<OwnedTableReference>,
-    /// Arrow field definition
+    /// Arrow field definition   在arrow-rs中描述列的元数据信息
     field: FieldRef,
 }
 

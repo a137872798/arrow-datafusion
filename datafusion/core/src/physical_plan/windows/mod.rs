@@ -53,9 +53,10 @@ use datafusion_physical_expr::PhysicalSortRequirement;
 pub use window_agg_exec::WindowAggExec;
 
 /// Create a physical expression for window function
+/// 创建一个窗口表达式
 pub fn create_window_expr(
     fun: &WindowFunction,
-    name: String,
+    name: String,  // 对应该物理计划的名称
     args: &[Arc<dyn PhysicalExpr>],
     partition_by: &[Arc<dyn PhysicalExpr>],
     order_by: &[PhysicalSortExpr],
@@ -63,10 +64,16 @@ pub fn create_window_expr(
     input_schema: &Schema,
 ) -> Result<Arc<dyn WindowExpr>> {
     Ok(match fun {
+        // 基于一个内置的聚合函数作为window表达式
         WindowFunction::AggregateFunction(fun) => {
+
+            // 这里已经生成了聚合函数物理expr  在上游的时候还只是一个符号(Count/Avg) 但是到了下游变成了有具体逻辑的物理表达式
             let aggregate =
                 aggregates::create_aggregate_expr(fun, false, args, input_schema, name)?;
+
+            // 然后将聚合表达式 包装成window expr
             if !window_frame.start_bound.is_unbounded() {
+                // 滑动的意思就是 随着range的推进 之前的部分数据的影响会被取消
                 Arc::new(SlidingAggregateWindowExpr::new(
                     aggregate,
                     partition_by,
@@ -82,12 +89,14 @@ pub fn create_window_expr(
                 ))
             }
         }
+        // 基于内建的window函数
         WindowFunction::BuiltInWindowFunction(fun) => Arc::new(BuiltInWindowExpr::new(
             create_built_in_window_expr(fun, args, input_schema, name)?,
             partition_by,
             order_by,
             window_frame,
         )),
+        // 基于用户自定义的聚合函数
         WindowFunction::AggregateUDF(fun) => Arc::new(PlainAggregateWindowExpr::new(
             udaf::create_aggregate_expr(fun.as_ref(), args, input_schema, name)?,
             partition_by,
@@ -97,6 +106,7 @@ pub fn create_window_expr(
     })
 }
 
+// 根据idx从参数中解析出某个标量
 fn get_scalar_value_from_args(
     args: &[Arc<dyn PhysicalExpr>],
     index: usize,
@@ -116,6 +126,7 @@ fn get_scalar_value_from_args(
     })
 }
 
+// 将内置的窗口函数  包装成expr
 fn create_built_in_window_expr(
     fun: &BuiltInWindowFunction,
     args: &[Arc<dyn PhysicalExpr>],
@@ -191,6 +202,7 @@ fn create_built_in_window_expr(
     })
 }
 
+// 计算期望的排序键
 pub(crate) fn calc_requirements<
     T: Borrow<Arc<dyn PhysicalExpr>>,
     S: Borrow<PhysicalSortExpr>,
@@ -198,12 +210,16 @@ pub(crate) fn calc_requirements<
     partition_by_exprs: impl IntoIterator<Item = T>,
     orderby_sort_exprs: impl IntoIterator<Item = S>,
 ) -> Option<Vec<PhysicalSortRequirement>> {
+
+    // 分区键排在前面
     let mut sort_reqs = partition_by_exprs
         .into_iter()
         .map(|partition_by| {
             PhysicalSortRequirement::new(partition_by.borrow().clone(), None)
         })
         .collect::<Vec<_>>();
+
+    // 之后是order键
     for element in orderby_sort_exprs.into_iter() {
         let PhysicalSortExpr { expr, options } = element.borrow();
         if !sort_reqs.iter().any(|e| e.expr().eq(expr)) {
@@ -220,24 +236,36 @@ pub(crate) fn calc_requirements<
 // This vector will be [1, 0]. It means that when we iterate b,a columns with the order [1, 0]
 // resulting vector (a, b) is a preset of the existing ordering (a, b, c).
 pub(crate) fn get_ordered_partition_by_indices(
-    partition_by_exprs: &[Arc<dyn PhysicalExpr>],
-    input: &Arc<dyn ExecutionPlan>,
+    partition_by_exprs: &[Arc<dyn PhysicalExpr>],  // 对应分区键
+    input: &Arc<dyn ExecutionPlan>,   // 通过该执行计划可以得到数据集
 ) -> Vec<usize> {
+
+    // 获得计划本身的输出顺序
     let input_ordering = input.output_ordering().unwrap_or(&[]);
+    // 得到内部的表达式
     let input_ordering_exprs = convert_to_expr(input_ordering);
+
+    // 该属性描述了某些col是等效的 other的列可以换成head
     let equal_properties = || input.equivalence_properties();
+
+    // 得到的是input_ordering_exprs中每个元素对应partition_by_exprs中元素的下标
     let input_places = get_indices_of_matching_exprs(
         &input_ordering_exprs,
         partition_by_exprs,
         equal_properties,
     );
+
+    // 因为之后还会用到反向操作  所以这里反过来也算了一次
     let mut partition_places = get_indices_of_matching_exprs(
         partition_by_exprs,
         &input_ordering_exprs,
         equal_properties,
     );
     partition_places.sort();
+
+    // 并且只保留连续的值  这样确保正向操作和反向操作的结果是一致的
     let first_n = longest_consecutive_prefix(partition_places);
+
     input_places[0..first_n].to_vec()
 }
 

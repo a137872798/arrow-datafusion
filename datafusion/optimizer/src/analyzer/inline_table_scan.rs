@@ -40,6 +40,7 @@ impl InlineTableScan {
 
 impl AnalyzerRule for InlineTableScan {
     fn analyze(&self, plan: LogicalPlan, _: &ConfigOptions) -> Result<LogicalPlan> {
+        // 将该函数作用到每个节点上
         plan.transform_up(&analyze_internal)
     }
 
@@ -48,6 +49,7 @@ impl AnalyzerRule for InlineTableScan {
     }
 }
 
+// 对plan进行分析
 fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
     Ok(match plan {
         // Match only on scans without filter / projection / fetch
@@ -61,8 +63,10 @@ fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
             ..
         }) if filters.is_empty() && source.get_logical_plan().is_some() => {
             let sub_plan = source.get_logical_plan().unwrap();
+            // 将映射提前作用到子计划上
             let projection_exprs = generate_projection_expr(&projection, sub_plan)?;
             let plan = LogicalPlanBuilder::from(sub_plan.clone())
+                // 将映射作用在子计划上
                 .project(projection_exprs)?
                 // Ensures that the reference to the inlined table remains the
                 // same, meaning we don't have to change any of the parent nodes
@@ -72,6 +76,7 @@ fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
             Transformed::Yes(plan)
         }
         LogicalPlan::Filter(filter) => {
+            // 对谓语进行增强
             let new_expr = filter.predicate.transform(&rewrite_subquery)?;
             Transformed::Yes(LogicalPlan::Filter(Filter::try_new(
                 new_expr,
@@ -82,6 +87,7 @@ fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
     })
 }
 
+// 对谓语进行增强
 fn rewrite_subquery(expr: Expr) -> Result<Transformed<Expr>> {
     match expr {
         Expr::Exists { subquery, negated } => {
@@ -121,11 +127,13 @@ fn generate_projection_expr(
     let mut exprs = vec![];
     if let Some(projection) = projection {
         for i in projection {
+            // column中包含列名
             exprs.push(Expr::Column(
                 sub_plan.schema().fields()[*i].qualified_column(),
             ));
         }
     } else {
+        // select *  ?
         exprs.push(Expr::Wildcard);
     }
     Ok(exprs)

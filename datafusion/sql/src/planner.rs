@@ -39,6 +39,7 @@ use crate::utils::make_decimal_type;
 
 /// The ContextProvider trait allows the query planner to obtain meta-data about tables and
 /// functions referenced in SQL statements
+/// 上下文就是用于提供需要的信息的
 pub trait ContextProvider {
     /// Getter for a datasource
     fn get_table_provider(&self, name: TableReference) -> Result<Arc<dyn TableSource>>;
@@ -47,9 +48,9 @@ pub trait ContextProvider {
     /// Getter for a UDAF description
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>>;
     /// Getter for system/user-defined variable type
+    /// 随时可以拿到需要的变量类型
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType>;
-
-    /// Get configuration options
+    /// Get configuration options  一堆乱七八糟的选项
     fn options(&self) -> &ConfigOptions;
 }
 
@@ -104,11 +105,14 @@ impl IdentNormalizer {
 pub struct PlannerContext {
     /// Data types for numbered parameters ($1, $2, etc), if supplied
     /// in `PREPARE` statement
+    /// 针对占位符变量  标明他们的类型
     prepare_param_data_types: Vec<DataType>,
     /// Map of CTE name to logical plan of the WITH clause.
     /// Use `Arc<LogicalPlan>` to allow cheap cloning
+    /// 存储逻辑计划的容器
     ctes: HashMap<String, Arc<LogicalPlan>>,
     /// The query schema of the outer query plan, used to resolve the columns in subquery
+    /// 什么叫外部查询计划的schema
     outer_query_schema: Option<DFSchema>,
 }
 
@@ -122,6 +126,7 @@ impl PlannerContext {
     /// Create an empty PlannerContext
     pub fn new() -> Self {
         Self {
+            // 默认都是空的  外部计划是None
             prepare_param_data_types: vec![],
             ctes: HashMap::new(),
             outer_query_schema: None,
@@ -185,7 +190,7 @@ pub struct SqlToRel<'a, S: ContextProvider> {
 }
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
-    /// Create a new query planner
+    /// Create a new query planner   除了schemaProvider其他参数都不是必要的
     pub fn new(schema_provider: &'a S) -> Self {
         Self::new_with_options(schema_provider, ParserOptions::default())
     }
@@ -200,6 +205,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         }
     }
 
+    // 通过一组列的定义信息 构造schema
     pub fn build_schema(&self, columns: Vec<SQLColumnDef>) -> Result<Schema> {
         let mut fields = Vec::with_capacity(columns.len());
 
@@ -209,7 +215,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 .options
                 .iter()
                 .any(|x| x.option == ColumnOption::NotNull);
+
+            // 构造arrow的列
             fields.push(Field::new(
+                // 对name进行规范化处理
                 self.normalizer.normalize(column.name),
                 data_type,
                 !not_nullable,
@@ -220,11 +229,13 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     /// Apply the given TableAlias to the top-level projection.
+    /// 为表级别的查询结果套一个别名
     pub(crate) fn apply_table_alias(
         &self,
         plan: LogicalPlan,
         alias: TableAlias,
     ) -> Result<LogicalPlan> {
+        // 表查询结果 实际上就是一个子查询
         let apply_name_plan = LogicalPlan::SubqueryAlias(SubqueryAlias::try_new(
             plan,
             self.normalizer.normalize(alias.name),
@@ -235,8 +246,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
     pub(crate) fn apply_expr_alias(
         &self,
-        plan: LogicalPlan,
-        idents: Vec<Ident>,
+        plan: LogicalPlan,   // 逻辑计划
+        idents: Vec<Ident>,   // table级别的别名其中也会包含列的别名
     ) -> Result<LogicalPlan> {
         if idents.is_empty() {
             Ok(plan)
@@ -250,6 +261,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             let fields = plan.schema().fields().clone();
             LogicalPlanBuilder::from(plan)
                 .project(fields.iter().zip(idents.into_iter()).map(|(field, ident)| {
+                    // 给expr col 上覆盖一层别名
                     col(field.name()).alias(self.normalizer.normalize(ident))
                 }))?
                 .build()
@@ -257,16 +269,19 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     /// Validate the schema provides all of the columns referenced in the expressions.
+    /// 验证schema是否满足表达式
     pub(crate) fn validate_schema_satisfies_exprs(
         &self,
         schema: &DFSchema,
         exprs: &[Expr],
     ) -> Result<()> {
+        // 找到col
         find_column_exprs(exprs)
             .iter()
             .try_for_each(|col| match col {
                 Expr::Column(col) => match &col.relation {
                     Some(r) => {
+                        // 从schema中找到匹配的field
                         schema.field_with_qualified_name(r, &col.name)?;
                         Ok(())
                     }
@@ -285,6 +300,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             })
     }
 
+    // 将sql-parser类型转换成arrow类型
     pub(crate) fn convert_data_type(&self, sql_type: &SQLDataType) -> Result<DataType> {
         match sql_type {
             SQLDataType::Array(Some(inner_sql_type)) => {
@@ -301,6 +317,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         }
     }
 
+    // 将sql_parser适配成arrow的类型
     fn convert_simple_data_type(&self, sql_type: &SQLDataType) -> Result<DataType> {
         match sql_type {
             SQLDataType::Boolean => Ok(DataType::Boolean),
@@ -417,6 +434,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 /// ['foo', 'bar']   -> Partial { schema: "foo", table: "bar" }
 /// ['foo', '"Bar"'] -> Partial { schema: "foo", table: "Bar" }
 /// ```
+/// 对表名进行规范化处理
 pub fn object_name_to_table_reference(
     object_name: ObjectName,
     enable_normalization: bool,

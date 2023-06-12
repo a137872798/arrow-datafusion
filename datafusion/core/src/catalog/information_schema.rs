@@ -53,6 +53,7 @@ pub const INFORMATION_SCHEMA_TABLES: &[&str] = &[TABLES, VIEWS, COLUMNS, DF_SETT
 /// demand. This means that if more tables are added to the underlying
 /// providers, they will appear the next time the `information_schema`
 /// table is queried.
+/// 内部包装了CatalogList 可以提供各种信息
 pub struct InformationSchemaProvider {
     config: InformationSchemaConfig,
 }
@@ -73,6 +74,7 @@ struct InformationSchemaConfig {
 
 impl InformationSchemaConfig {
     /// Construct the `information_schema.tables` virtual table
+    /// 基于schema信息产生表
     async fn make_tables(&self, builder: &mut InformationSchemaTablesBuilder) {
         // create a mem table with the names of tables
 
@@ -80,10 +82,13 @@ impl InformationSchemaConfig {
             let catalog = self.catalog_list.catalog(&catalog_name).unwrap();
 
             for schema_name in catalog.schema_names() {
+                // 忽略内置schema
                 if schema_name != INFORMATION_SCHEMA {
                     let schema = catalog.schema(&schema_name).unwrap();
                     for table_name in schema.table_names() {
                         let table = schema.table(&table_name).await.unwrap();
+
+                        // 细化到各个表 使用builder进行构建
                         builder.add_table(
                             &catalog_name,
                             &schema_name,
@@ -95,6 +100,7 @@ impl InformationSchemaConfig {
             }
 
             // Add a final list for the information schema tables themselves
+            // 然后开始添加内置表了   用于展示所有表/视图的视图
             builder.add_table(&catalog_name, INFORMATION_SCHEMA, TABLES, TableType::View);
             builder.add_table(&catalog_name, INFORMATION_SCHEMA, VIEWS, TableType::View);
             builder.add_table(
@@ -121,6 +127,7 @@ impl InformationSchemaConfig {
                     let schema = catalog.schema(&schema_name).unwrap();
                     for table_name in schema.table_names() {
                         let table = schema.table(&table_name).await.unwrap();
+                        // 添加视图  注意这里使用的是另外的builder
                         builder.add_view(
                             &catalog_name,
                             &schema_name,
@@ -144,6 +151,7 @@ impl InformationSchemaConfig {
                     for table_name in schema.table_names() {
                         let table = schema.table(&table_name).await.unwrap();
                         for (i, field) in table.schema().fields().iter().enumerate() {
+                            // 又是不同的builder
                             builder.add_column(
                                 &catalog_name,
                                 &schema_name,
@@ -166,12 +174,14 @@ impl InformationSchemaConfig {
         config_options: &ConfigOptions,
         builder: &mut InformationSchemaDfSettingsBuilder,
     ) {
+        // 也支持添加配置
         for entry in config_options.entries() {
             builder.add_setting(entry);
         }
     }
 }
 
+// 作为information表 能够提供各种视图
 #[async_trait]
 impl SchemaProvider for InformationSchemaProvider {
     fn as_any(&self) -> &(dyn Any + 'static) {
@@ -270,12 +280,14 @@ struct InformationSchemaTablesBuilder {
 }
 
 impl InformationSchemaTablesBuilder {
+
+    // 追加一个待构建的表
     fn add_table(
         &mut self,
         catalog_name: impl AsRef<str>,
         schema_name: impl AsRef<str>,
         table_name: impl AsRef<str>,
-        table_type: TableType,
+        table_type: TableType,  // 表类型
     ) {
         // Note: append_value is actually infallable.
         self.catalog_names.append_value(catalog_name.as_ref());

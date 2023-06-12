@@ -29,15 +29,21 @@ use datafusion_common::{DataFusionError, Result};
 ///
 /// For more details on coercion in general, please see the
 /// [`type_coercion`](crate::type_coercion) module.
+/// 感觉是根据签名修正参数类型
 pub fn data_types(
     current_types: &[DataType],
     signature: &Signature,
 ) -> Result<Vec<DataType>> {
+
+    // 参数没有传 返回也是空的
     if current_types.is_empty() {
         return Ok(vec![]);
     }
+
+    // 返回所有可能的参数类型
     let valid_types = get_valid_types(&signature.type_signature, current_types)?;
 
+    // 只要一个是完全匹配的  就代表参数是符合签名的
     if valid_types
         .iter()
         .any(|data_type| data_type == current_types)
@@ -58,30 +64,43 @@ pub fn data_types(
     )))
 }
 
+
+// 一个参数签名枚举 并不是只对应一种情况 这里返回了所有可能的情况 某些情况需要借助传入的参数
 fn get_valid_types(
     signature: &TypeSignature,
     current_types: &[DataType],
 ) -> Result<Vec<Vec<DataType>>> {
     let valid_types = match signature {
+        // 任意数量的给定类型    根据current_types的数量 每个都对应一个valid_type
         TypeSignature::Variadic(valid_types) => valid_types
             .iter()
             .map(|valid_type| current_types.iter().map(|_| valid_type.clone()).collect())
             .collect(),
+
+        // 代表每个类型都出现了相同的次数  返回的Vec<Vec<DataType>> 中每个Vec<DataType> 对应一个数据类型
         TypeSignature::Uniform(number, valid_types) => valid_types
             .iter()
             .map(|valid_type| (0..*number).map(|_| valid_type.clone()).collect())
             .collect(),
+
+        // 任意数量参数  类型一致
         TypeSignature::VariadicEqual => {
             // one entry with the same len as current_types, whose type is `current_types[0]`.
             vec![current_types
                 .iter()
+                // 因为是任意类型 且要求类型一致 所以只要看参数的第一个就行了
                 .map(|_| current_types[0].clone())
                 .collect()]
         }
+        // 代表类型不需要修正吧
         TypeSignature::VariadicAny => {
             vec![current_types.to_vec()]
         }
+
+        // 每个类型仅出现一次
         TypeSignature::Exact(valid_types) => vec![valid_types.clone()],
+
+        // 对应参数数量
         TypeSignature::Any(number) => {
             if current_types.len() != *number {
                 return Err(DataFusionError::Plan(format!(
@@ -92,6 +111,8 @@ fn get_valid_types(
             }
             vec![(0..*number).map(|i| current_types[i].clone()).collect()]
         }
+
+        // 返回所有可能
         TypeSignature::OneOf(types) => types
             .iter()
             .filter_map(|t| get_valid_types(t, current_types).ok())
@@ -103,8 +124,9 @@ fn get_valid_types(
 }
 
 /// Try to coerce current_types into valid_types.
+/// 在参数类型没有直接匹配的情况下 尝试做兼容
 fn maybe_data_types(
-    valid_types: &[DataType],
+    valid_types: &[DataType],  // 满足条件的一种参数组合
     current_types: &[DataType],
 ) -> Option<Vec<DataType>> {
     if valid_types.len() != current_types.len() {
@@ -115,10 +137,11 @@ fn maybe_data_types(
     for (i, valid_type) in valid_types.iter().enumerate() {
         let current_type = &current_types[i];
 
+        // 匹配的直接存入即可
         if current_type == valid_type {
             new_type.push(current_type.clone())
         } else {
-            // attempt to coerce
+            // attempt to coerce  判断类型能否兼容
             if can_coerce_from(valid_type, current_type) {
                 new_type.push(valid_type.clone())
             } else {

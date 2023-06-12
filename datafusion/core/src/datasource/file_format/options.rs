@@ -413,6 +413,8 @@ impl ReadOptions<'_> for CsvReadOptions<'_> {
 
 #[async_trait]
 impl ReadOptions<'_> for ParquetReadOptions<'_> {
+
+    // 读取parquet文件时 相关的选项
     fn to_listing_options(&self, config: &SessionConfig) -> ListingOptions {
         let file_format = ParquetFormat::new()
             .with_enable_pruning(self.parquet_pruning)

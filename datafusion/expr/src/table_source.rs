@@ -24,29 +24,33 @@ use std::any::Any;
 
 /// Indicates whether and how a filter expression can be handled by a
 /// TableProvider for table scans.
+/// 描述条件语句如何作用在表上
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableProviderFilterPushDown {
-    /// The expression cannot be used by the provider.
+    /// The expression cannot be used by the provider.    表不支持表达式查询
     Unsupported,
     /// The expression can be used to help minimise the data retrieved,
     /// but the provider cannot guarantee that all returned tuples
     /// satisfy the filter. The Filter plan node containing this expression
     /// will be preserved.
+    /// 可以帮助命中有效数据 但是无法保证所有返回数据一定满足表达式
     Inexact,
     /// The provider guarantees that all returned data satisfies this
     /// filter expression. The Filter plan node containing this expression
     /// will be removed.
+    /// 确保返回数据都满足表达式
     Exact,
 }
 
 /// Indicates the type of this table for metadata/catalog purposes.
+/// 描述表类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableType {
-    /// An ordinary physical table.
+    /// An ordinary physical table.  物理表
     Base,
-    /// A non-materialised table that itself uses a query internally to provide data.
+    /// A non-materialised table that itself uses a query internally to provide data.  视图
     View,
-    /// A transient table.
+    /// A transient table.  内存表
     Temporary,
 }
 
@@ -58,23 +62,27 @@ pub enum TableType {
 /// having two separate traits is to avoid having the logical plan code be dependent
 /// on the DataFusion execution engine. Other projects may want to use DataFusion's
 /// logical plans and have their own execution engine.
+/// 将它与tableProvides分开  是为了在logical plans 和execution engine上分开
 pub trait TableSource: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     /// Get a reference to the schema for this table
+    /// 获取表的元数据信息
     fn schema(&self) -> SchemaRef;
 
     /// Get the type of this table for metadata/catalog purposes.
+    /// 获取表类型 默认是物理表
     fn table_type(&self) -> TableType {
         TableType::Base
     }
 
     /// Tests whether the table provider can make use of a filter expression
     /// to optimise data retrieval.
+    /// 判断表是否支持使用该表达式 默认不支持
     #[deprecated(since = "20.0.0", note = "use supports_filters_pushdown instead")]
     fn supports_filter_pushdown(
         &self,
-        _filter: &Expr,
+        _filter: &Expr,  // 这不就是sql吗...
     ) -> Result<TableProviderFilterPushDown> {
         Ok(TableProviderFilterPushDown::Unsupported)
     }
@@ -84,7 +92,7 @@ pub trait TableSource: Sync + Send {
     #[allow(deprecated)]
     fn supports_filters_pushdown(
         &self,
-        filters: &[&Expr],
+        filters: &[&Expr],   // 使用一组表达式检索数据
     ) -> Result<Vec<TableProviderFilterPushDown>> {
         filters
             .iter()
@@ -93,6 +101,7 @@ pub trait TableSource: Sync + Send {
     }
 
     /// Get the Logical plan of this table provider, if available.
+    /// 逻辑计划是归属于表的
     fn get_logical_plan(&self) -> Option<&LogicalPlan> {
         None
     }

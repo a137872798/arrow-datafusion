@@ -30,8 +30,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 /// This object stores the window frame state for use in incremental calculations.
+/// 在进行窗口函数处理时 使用的上下文对象
 #[derive(Debug)]
 pub enum WindowFrameContext {
+    /// WindowFrame 描述了上下界
+
     /// ROWS frames are inherently stateless.
     Rows(Arc<WindowFrame>),
     /// RANGE frames are stateful, they store indices specifying where the
@@ -39,20 +42,23 @@ pub enum WindowFrameContext {
     /// where n denotes the row count.
     Range {
         window_frame: Arc<WindowFrame>,
-        state: WindowFrameStateRange,
+        state: WindowFrameStateRange,  /// 描述排序选项
     },
     /// GROUPS frames are stateful, they store group boundaries and indices
     /// specifying where the previous search left off. This amortizes the
     /// overall cost to O(n) where n denotes the row count.
     Groups {
         window_frame: Arc<WindowFrame>,
-        state: WindowFrameStateGroups,
+        state: WindowFrameStateGroups,  /// 包含每组的范围 以及当前组下标
     },
 }
 
 impl WindowFrameContext {
     /// Create a new state object for the given window frame.
+    /// 根据frame 产生对应类型的上下文
     pub fn new(window_frame: Arc<WindowFrame>, sort_options: Vec<SortOptions>) -> Self {
+
+        // 根据frame单元 产生不同对象
         match window_frame.units {
             WindowFrameUnits::Rows => WindowFrameContext::Rows(window_frame),
             WindowFrameUnits::Range => WindowFrameContext::Range {
@@ -70,11 +76,13 @@ impl WindowFrameContext {
     pub fn calculate_range(
         &mut self,
         range_columns: &[ArrayRef],
-        last_range: &Range<usize>,
-        length: usize,
-        idx: usize,
+        last_range: &Range<usize>,  // 推算本次的range 需要上次range信息
+        length: usize,   // 总计有多少数据
+        idx: usize,    // 此时的下标
     ) -> Result<Range<usize>> {
         match self {
+
+            // 根据len，idx  划分出本次的range   计算方式见函数
             WindowFrameContext::Rows(window_frame) => {
                 Self::calculate_range_rows(window_frame, length, idx)
             }
@@ -102,11 +110,16 @@ impl WindowFrameContext {
     }
 
     /// This function calculates beginning/ending indices for the frame of the current row.
+    /// 划分出一个新的range
     fn calculate_range_rows(
         window_frame: &Arc<WindowFrame>,
         length: usize,
         idx: usize,
     ) -> Result<Range<usize>> {
+
+        // Rows类型调用该方法   而rows范围推断是跟当前row挂钩的
+
+        // 这里认为 idx 是在0的基础上 而不是n的基础上
         let start = match window_frame.start_bound {
             // UNBOUNDED PRECEDING
             WindowFrameBound::Preceding(ScalarValue::UInt64(None)) => 0,
@@ -132,6 +145,8 @@ impl WindowFrameContext {
                 return Err(DataFusionError::Internal("Rows should be Uint".to_string()))
             }
         };
+
+        // 计算方式跟上面一样的
         let end = match window_frame.end_bound {
             // UNBOUNDED PRECEDING
             WindowFrameBound::Preceding(ScalarValue::UInt64(None)) => {
@@ -167,6 +182,7 @@ impl WindowFrameContext {
 /// BY clause. This information is used to calculate the range.
 #[derive(Debug, Default)]
 pub struct WindowFrameStateRange {
+    // 窗口函数关联的排序列的排序方式
     sort_options: Vec<SortOptions>,
 }
 
@@ -184,12 +200,14 @@ impl WindowFrameStateRange {
     fn calculate_range(
         &mut self,
         window_frame: &Arc<WindowFrame>,
-        last_range: &Range<usize>,
-        range_columns: &[ArrayRef],
-        length: usize,
-        idx: usize,
+        last_range: &Range<usize>,   // 上次的范围
+        range_columns: &[ArrayRef],  // 对应排序列的值
+        length: usize,   // 总长度
+        idx: usize,   // 当前下标
     ) -> Result<Range<usize>> {
         let start = match window_frame.start_bound {
+            // 3个的第一个参数都是true 代表取last_range.start
+
             WindowFrameBound::Preceding(ref n) => {
                 if n.is_null() {
                     // UNBOUNDED PRECEDING
@@ -221,6 +239,8 @@ impl WindowFrameStateRange {
                 )?,
         };
         let end = match window_frame.end_bound {
+            // 3个false 代表取last_range.end
+
             WindowFrameBound::Preceding(ref n) => self
                 .calculate_index_of_row::<false, true>(
                     range_columns,
@@ -237,6 +257,7 @@ impl WindowFrameStateRange {
                 length,
             )?,
             WindowFrameBound::Following(ref n) => {
+                // 未指定n的情况下   为最大值length
                 if n.is_null() {
                     // UNBOUNDED FOLLOWING
                     length
@@ -259,14 +280,18 @@ impl WindowFrameStateRange {
     /// supplied as true and false, respectively).
     fn calculate_index_of_row<const SIDE: bool, const SEARCH_SIDE: bool>(
         &mut self,
-        range_columns: &[ArrayRef],
-        last_range: &Range<usize>,
-        idx: usize,
-        delta: Option<&ScalarValue>,
-        length: usize,
+        range_columns: &[ArrayRef],   // 排序列
+        last_range: &Range<usize>,   // 上一次使用的range
+        idx: usize,   // 下标
+        delta: Option<&ScalarValue>,   //
+        length: usize,   // 总长度
     ) -> Result<usize> {
+        // 拿到这些排序列 对应idx行的值
         let current_row_values = get_row_at_idx(range_columns, idx)?;
+
         let end_range = if let Some(delta) = delta {
+
+            // 决定了value +- delta
             let is_descending: bool = self
                 .sort_options
                 .first()
@@ -283,6 +308,7 @@ impl WindowFrameStateRange {
                     if value.is_null() {
                         return Ok(value.clone());
                     }
+                    // 根据side 选择+delta/-delta
                     if SEARCH_SIDE == is_descending {
                         // TODO: Handle positive overflows.
                         value.add(delta)
@@ -298,6 +324,8 @@ impl WindowFrameStateRange {
                 })
                 .collect::<Result<Vec<ScalarValue>>>()?
         } else {
+
+            // 没有delta修正的情况下 就是取idx行的值
             current_row_values
         };
         let search_start = if SIDE {
@@ -306,9 +334,12 @@ impl WindowFrameStateRange {
             last_range.end
         };
         let compare_fn = |current: &[ScalarValue], target: &[ScalarValue]| {
+            // 比较2个值的大小
             let cmp = compare_rows(current, target, &self.sort_options)?;
             Ok(if SIDE { cmp.is_lt() } else { cmp.is_le() })
         };
+
+        // 按照side的排序方向 找到第一个>(<)search_start的值
         search_in_slice(range_columns, &end_range, compare_fn, search_start, length)
     }
 }
@@ -351,11 +382,12 @@ impl WindowFrameStateGroups {
     fn calculate_range(
         &mut self,
         window_frame: &Arc<WindowFrame>,
-        range_columns: &[ArrayRef],
+        range_columns: &[ArrayRef],  // 可以将传入的认为是排序列
         length: usize,
         idx: usize,
     ) -> Result<Range<usize>> {
         let start = match window_frame.start_bound {
+            // 这部分跟range很像
             WindowFrameBound::Preceding(ref n) => {
                 if n.is_null() {
                     // UNBOUNDED PRECEDING
@@ -420,9 +452,9 @@ impl WindowFrameStateGroups {
     /// the sign of `delta` (where true/false represents negative/positive respectively).
     fn calculate_index_of_row<const SIDE: bool, const SEARCH_SIDE: bool>(
         &mut self,
-        range_columns: &[ArrayRef],
-        idx: usize,
-        delta: Option<&ScalarValue>,
+        range_columns: &[ArrayRef],  // 就理解成排序列
+        idx: usize,    // 当前下标
+        delta: Option<&ScalarValue>,  // 要对得出的列值进行修正
         length: usize,
     ) -> Result<usize> {
         let delta = if let Some(delta) = delta {
@@ -435,20 +467,28 @@ impl WindowFrameStateGroups {
                 ));
             }
         } else {
+            // 否则为0
             0
         };
         let mut group_start = 0;
+        // 取出第一个值  (双端队列可以往最前/最后插入)
+        // group_end_indices 存储了每个组的(start,end) 同时还有一个数字 该数字对应下个组的起始idx
         let last_group = self.group_end_indices.back_mut();
+
+        // 第一次调用last_group肯定是None
+        // group_row 组信息 也就是start，end      group_end 对应最后一次出现的idx
         if let Some((group_row, group_end)) = last_group {
             if *group_end < length {
+                // 这对应的是下个group的值
                 let new_group_row = get_row_at_idx(range_columns, *group_end)?;
                 // If last/current group keys are the same, we extend the last group:
+                // 发现下个组与这个组的值是一样的  需要更新end
                 if new_group_row.eq(group_row) {
                     // Update the end boundary of the group (search right boundary):
                     *group_end = search_in_slice(
                         range_columns,
                         group_row,
-                        check_equality,
+                        check_equality,  // 直到与group不相同才会返回
                         *group_end,
                         length,
                     )?;
@@ -459,7 +499,9 @@ impl WindowFrameStateGroups {
         }
 
         // Advance groups until `idx` is inside a group:
+        // 从上面发现 group_start跨入下个组   如果idx跨入下个组 那么就要产生新的group
         while idx >= group_start {
+            // 一开始对应的是第一行的值
             let group_row = get_row_at_idx(range_columns, group_start)?;
             // Find end boundary of the group (search right boundary):
             let group_end = search_in_slice(
@@ -469,11 +511,14 @@ impl WindowFrameStateGroups {
                 group_start,
                 length,
             )?;
+
             self.group_end_indices.push_back((group_row, group_end));
+            // 如果idx超过了上个组  那么要推进到一个新组
             group_start = group_end;
         }
 
         // Update the group index `idx` belongs to:
+        // 找到超过idx 下标的group
         while self.current_group_idx < self.group_end_indices.len()
             && idx >= self.group_end_indices[self.current_group_idx].1
         {
@@ -481,6 +526,7 @@ impl WindowFrameStateGroups {
         }
 
         // Find the group index of the frame boundary:
+        // 还要被delta修正
         let group_idx = if SEARCH_SIDE {
             if self.current_group_idx > delta {
                 self.current_group_idx - delta
@@ -492,9 +538,13 @@ impl WindowFrameStateGroups {
         };
 
         // Extend `group_start_indices` until it includes at least `group_idx`:
+        // 跟着group_idx 补充group
         while self.group_end_indices.len() <= group_idx && group_start < length {
+
+            // 先取到该group的值
             let group_row = get_row_at_idx(range_columns, group_start)?;
             // Find end boundary of the group (search right boundary):
+            // false才会退出
             let group_end = search_in_slice(
                 range_columns,
                 &group_row,

@@ -43,6 +43,7 @@ use crate::error::Result;
 /// // when operator is finished:
 /// baseline_metrics.done();
 /// ```
+/// 基线指标 内部包含了多个维度的指标
 #[derive(Debug)]
 pub struct BaselineMetrics {
     /// end_time is set when `ExecutionMetrics::done()` is called
@@ -71,6 +72,7 @@ impl BaselineMetrics {
         start_time.record();
 
         Self {
+            // 在build的同时 这些指标还会加入到ExecutionPlanMetricsSet中
             end_time: MetricBuilder::new(metrics).end_timestamp(partition),
             elapsed_compute: MetricBuilder::new(metrics).elapsed_compute(partition),
             spill_count: MetricBuilder::new(metrics).spill_count(partition),
@@ -101,6 +103,7 @@ impl BaselineMetrics {
     }
 
     /// Record a spill of `spilled_bytes` size.
+    /// 触发了一次泄漏 增加计数值以及总泄漏字节数
     pub fn record_spill(&self, spilled_bytes: usize) {
         self.spill_count.add(1);
         self.spilled_bytes.add(spilled_bytes);
@@ -118,6 +121,7 @@ impl BaselineMetrics {
     /// `BaselineMetrics` is not `drop`ped immediately upon operator
     /// completion, as async streams may not be dropped immediately
     /// depending on the consumer.
+    /// 操作结束了 记录结束时间
     pub fn done(&self) {
         self.end_time.record()
     }
@@ -126,6 +130,7 @@ impl BaselineMetrics {
     ///
     /// See the [`RecordOutput`] for conveniently recording record
     /// batch output for other thing
+    /// 记录输出的总行数
     pub fn record_output(&self, num_rows: usize) {
         self.output_rows.add(num_rows);
     }
@@ -140,6 +145,7 @@ impl BaselineMetrics {
     /// Process a poll result of a stream producing output for an
     /// operator, recording the output rows and stream done time and
     /// returning the same poll result
+    /// 每拉取到一批记录后 作用到统计对象上
     pub fn record_poll(
         &self,
         poll: Poll<Option<Result<RecordBatch>>>,
@@ -149,6 +155,8 @@ impl BaselineMetrics {
                 Some(Ok(batch)) => {
                     batch.record_output(self);
                 }
+
+                // 代表流程终止了
                 Some(Err(_)) => self.done(),
                 None => self.done(),
             }
@@ -163,7 +171,7 @@ impl Drop for BaselineMetrics {
     }
 }
 
-/// Trait for things that produce output rows as a result of execution.
+/// Trait for things that produce output rows as a result of execution.   表示可以记录输出行数的特征
 pub trait RecordOutput {
     /// Record that some number of output rows have been produced
     ///

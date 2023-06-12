@@ -28,6 +28,7 @@ use std::sync::Arc;
 ///
 /// This structure adapts a `TableProvider` (physical plan trait) to the `TableSource`
 /// (logical plan trait)
+/// 代理模式
 pub struct DefaultTableSource {
     /// table provider
     pub table_provider: Arc<dyn TableProvider>,

@@ -51,20 +51,25 @@ impl DecorrelateWhereExists {
         predicate: &Expr,
         config: &dyn OptimizerConfig,
     ) -> Result<(Vec<SubqueryInfo>, Vec<Expr>)> {
+        // 拆解拿到谓语内部的expr
         let filters = split_conjunction(predicate);
 
         let mut subqueries = vec![];
         let mut others = vec![];
         for it in filters.iter() {
+            // 也就是说谓语可以是一个子查询
             match it {
                 Expr::Exists { subquery, negated } => {
                     let subquery_plan = self
                         .try_optimize(&subquery.subquery, config)?
                         .map(Arc::new)
                         .unwrap_or_else(|| subquery.subquery.clone());
+
+                    // 更新子查询语句
                     let new_subquery = subquery.with_plan(subquery_plan);
                     subqueries.push(SubqueryInfo::new(new_subquery, *negated));
                 }
+                // 原样转移
                 _ => others.push((*it).clone()),
             }
         }
@@ -74,11 +79,13 @@ impl DecorrelateWhereExists {
 }
 
 impl OptimizerRule for DecorrelateWhereExists {
+
     fn try_optimize(
         &self,
         plan: &LogicalPlan,
         config: &dyn OptimizerConfig,
     ) -> Result<Option<LogicalPlan>> {
+        // 尝试进行优化
         match plan {
             LogicalPlan::Filter(filter) => {
                 let (subqueries, other_exprs) =
@@ -89,7 +96,10 @@ impl OptimizerRule for DecorrelateWhereExists {
                 }
 
                 // iterate through all exists clauses in predicate, turning each into a join
+                // 将改进后的exists有关的子查询作用到输入上
                 let mut cur_input = filter.input.as_ref().clone();
+
+                // 把exist内的子查询提取到外层变成 join连接
                 for subquery in subqueries {
                     if let Some(x) = optimize_exists(&subquery, &cur_input)? {
                         cur_input = x;
@@ -98,7 +108,9 @@ impl OptimizerRule for DecorrelateWhereExists {
                     }
                 }
 
+                // 将剩下的表达式连接起来
                 let expr = conjunction(other_exprs);
+                // 重新包装成filter
                 if let Some(expr) = expr {
                     let new_filter = Filter::try_new(expr, Arc::new(cur_input))?;
                     cur_input = LogicalPlan::Filter(new_filter);
@@ -139,6 +151,7 @@ impl OptimizerRule for DecorrelateWhereExists {
 ///
 /// * query_info - The subquery and negated(exists/not exists) info.
 /// * outer_input - The non-subquery portion (relation t1)
+/// 把join操作提到外层了
 fn optimize_exists(
     query_info: &SubqueryInfo,
     outer_input: &LogicalPlan,
@@ -167,8 +180,10 @@ fn optimize_exists(
 }
 /// Optimize the subquery and extract the possible join filter.
 /// This function can't optimize non-correlated subquery, and will return None.
+/// 优化子查询
 fn optimize_subquery(subquery: &LogicalPlan) -> Result<Option<(Expr, LogicalPlan)>> {
     match subquery {
+        // 如果子查询套了一层Distinct  先对内部的计划进行优化
         LogicalPlan::Distinct(subqry_distinct) => {
             let distinct_input = &subqry_distinct.input;
             let optimized_plan =
@@ -182,6 +197,8 @@ fn optimize_subquery(subquery: &LogicalPlan) -> Result<Option<(Expr, LogicalPlan
                 });
             Ok(optimized_plan)
         }
+
+        // 如果子查询被投影包装   因为子查询也可以是一个复杂的表达式
         LogicalPlan::Projection(projection) => {
             // extract join filters
             let (join_filters, subquery_input) = extract_join_filters(&projection.input)?;

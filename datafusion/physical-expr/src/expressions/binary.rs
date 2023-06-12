@@ -98,7 +98,7 @@ use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::type_coercion::binary::binary_operator_data_type;
 use datafusion_expr::{ColumnarValue, Operator};
 
-/// Binary expression
+/// Binary expression  二元表达式
 #[derive(Debug)]
 pub struct BinaryExpr {
     left: Arc<dyn PhysicalExpr>,
@@ -248,6 +248,7 @@ macro_rules! compute_utf8_op_scalar {
             .as_any()
             .downcast_ref::<$DT>()
             .expect("compute_op failed to downcast left side array");
+        // 解开右侧的值
         if let ScalarValue::Utf8(Some(string_value))
         | ScalarValue::LargeUtf8(Some(string_value)) = $RIGHT
         {
@@ -255,6 +256,7 @@ macro_rules! compute_utf8_op_scalar {
                 &ll,
                 &string_value,
             )?))
+            // 右侧没有值的话 产生一个左侧的数组
         } else if $RIGHT.is_null() {
             Ok(Arc::new(new_null_array($OP_TYPE, $LEFT.len())))
         } else {
@@ -638,6 +640,7 @@ macro_rules! compute_utf8_flag_op_scalar {
     }};
 }
 
+// 作为二元表达式 体现物理表达式的职能
 impl PhysicalExpr for BinaryExpr {
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
@@ -662,6 +665,7 @@ impl PhysicalExpr for BinaryExpr {
         let left_data_type = left_value.data_type();
         let right_data_type = right_value.data_type();
 
+        // 进行类型匹配
         match (&left_value, &left_data_type, &right_value, &right_data_type) {
             // Types are equal => valid
             (_, l, _, r) if l == r => {}
@@ -1021,6 +1025,7 @@ pub(crate) fn array_eq_scalar(lhs: &dyn Array, rhs: &ScalarValue) -> Result<Arra
 impl BinaryExpr {
     /// Evaluate the expression of the left input is an array and
     /// right is literal - use scalar operations
+    /// 将一个value 与一组col值计算
     fn evaluate_array_scalar(
         &self,
         array: &dyn Array,
@@ -1221,6 +1226,7 @@ impl BinaryExpr {
 /// Create a binary expression whose arguments are correctly coerced.
 /// This function errors if it is not possible to coerce the arguments
 /// to computational types supported by the operator.
+/// 处理二元表达式
 pub fn binary(
     lhs: Arc<dyn PhysicalExpr>,
     op: Operator,

@@ -26,6 +26,7 @@
 use chrono::Datelike;
 
 /// Returns true if the year is a leap-year, as naively defined in the Gregorian calendar.
+/// 是否是闰年
 #[inline]
 fn is_leap_year(year: i32) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)

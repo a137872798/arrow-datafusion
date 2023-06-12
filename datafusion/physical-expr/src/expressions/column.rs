@@ -30,11 +30,13 @@ use crate::{AnalysisContext, PhysicalExpr};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::ColumnarValue;
 
-/// Represents the column at a given index in a RecordBatch
+/// Represents the column at a given index in a RecordBatch  
+/// 作为物理计划的列 (虽然与逻辑计划的column同名 但是本质上是2个不同的抽象层)
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct Column {
+    // 列名以及在schema中的下标 
     name: String,
-    index: usize,
+    index: usize,  
 }
 
 impl Column {
@@ -68,6 +70,7 @@ impl std::fmt::Display for Column {
     }
 }
 
+// 该物理计划 就代表只要结果集中的一列 
 impl PhysicalExpr for Column {
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn std::any::Any {
@@ -75,23 +78,28 @@ impl PhysicalExpr for Column {
     }
 
     /// Get the data type of this expression, given the schema of the input
+    /// 既然该物理计划是要获取该列值  那么类型自然就是schema对应的列
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
         self.bounds_check(input_schema)?;
         Ok(input_schema.field(self.index).data_type().clone())
     }
 
     /// Decide whehter this expression is nullable, given the schema of the input
+    /// 根据schema信息判断能否为null
     fn nullable(&self, input_schema: &Schema) -> Result<bool> {
         self.bounds_check(input_schema)?;
         Ok(input_schema.field(self.index).is_nullable())
     }
 
     /// Evaluate the expression
+    /// 借助数据集产生结果
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         self.bounds_check(batch.schema().as_ref())?;
+        // 返回对应列的结果
         Ok(ColumnarValue::Array(batch.column(self.index).clone()))
     }
 
+    // col本身比较简单  内部不会嵌套其他表达式
     fn children(&self) -> Vec<Arc<dyn PhysicalExpr>> {
         vec![]
     }
@@ -104,6 +112,7 @@ impl PhysicalExpr for Column {
     }
 
     /// Return the boundaries of this column, if known.
+    /// 只保留特定列的分析结果
     fn analyze(&self, context: AnalysisContext) -> AnalysisContext {
         assert!(self.index < context.column_boundaries.len());
         let col_bounds = context.column_boundaries[self.index].clone();
@@ -121,6 +130,8 @@ impl PartialEq<dyn Any> for Column {
 }
 
 impl Column {
+
+    // 检查该列是否不会超过schema的总列数
     fn bounds_check(&self, input_schema: &Schema) -> Result<()> {
         if self.index < input_schema.fields.len() {
             Ok(())
@@ -133,7 +144,7 @@ impl Column {
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]   // 不知道该列的下标
 pub struct UnKnownColumn {
     name: String,
 }
@@ -164,7 +175,7 @@ impl PhysicalExpr for UnKnownColumn {
         self
     }
 
-    /// Get the data type of this expression, given the schema of the input
+    /// Get the data type of this expression, given the schema of the input  无法获取类型
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
         Ok(DataType::Null)
     }

@@ -32,18 +32,20 @@ use crate::{
 };
 
 /// Task Execution Context
+/// 执行任务过程中的上下文
 pub struct TaskContext {
-    /// Session Id
+    /// Session Id   任务关联的会话id
     session_id: String,
-    /// Optional Task Identify
+    /// Optional Task Identify   任务id
     task_id: Option<String>,
-    /// Session configuration
+    /// Session configuration     这里包含了各种各样的配置
     session_config: SessionConfig,
+    /// 用户定义函数
     /// Scalar functions associated with this task context
     scalar_functions: HashMap<String, Arc<ScalarUDF>>,
     /// Aggregate functions associated with this task context
     aggregate_functions: HashMap<String, Arc<AggregateUDF>>,
-    /// Runtime environment associated with this task context
+    /// Runtime environment associated with this task context   运行环境包含了ObjectStore MemoryPool DiskManager
     runtime: Arc<RuntimeEnv>,
 }
 
@@ -76,11 +78,11 @@ impl TaskContext {
     pub fn try_new(
         task_id: String,
         session_id: String,
-        task_props: HashMap<String, String>,
+        task_props: HashMap<String, String>,   // 该任务属性
         scalar_functions: HashMap<String, Arc<ScalarUDF>>,
         aggregate_functions: HashMap<String, Arc<AggregateUDF>>,
         runtime: Arc<RuntimeEnv>,
-        extensions: Extensions,
+        extensions: Extensions,   // 通过拓展信息生成配置
     ) -> Result<Self> {
         let mut config = ConfigOptions::new().with_extensions(extensions);
         for (k, v) in task_props {
@@ -124,6 +126,7 @@ impl TaskContext {
     }
 }
 
+// 上下文本身也支持注册和查询函数
 impl FunctionRegistry for TaskContext {
     fn udfs(&self) -> HashSet<String> {
         self.scalar_functions.keys().cloned().collect()

@@ -25,6 +25,7 @@ use sqlparser::parser::ParserError::ParserError;
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     /// Generate a logical plan from an SQL query
+    /// 将查询语句转换成plan
     pub(crate) fn query_to_plan(
         &self,
         query: Query,
@@ -42,6 +43,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         let set_expr = query.body;
+
+        // 代表关联查询  TODO CTE是sql中的高级语法 配合With使用。 可以先忽略
         if let Some(with) = query.with {
             // Process CTEs from top to bottom
             // do not allow self-references
@@ -51,6 +54,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 ));
             }
 
+            // 先将内部的转换成plan
             for cte in with.cte_tables {
                 // A `WITH` block can't use the same name more than once
                 let cte_name = self.normalizer.normalize(cte.alias.name.clone());
@@ -66,13 +70,18 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
                 // Each `WITH` block can change the column names in the last
                 // projection (e.g. "WITH table(t1, t2) AS SELECT 1, 2").
+
                 let logical_plan = self.apply_table_alias(logical_plan, cte.alias)?;
 
                 planner_context.insert_cte(cte_name, logical_plan);
             }
         }
+
+        // 将sqlExpr 转换成逻辑计划
         let plan = self.set_expr_to_plan(*set_expr, planner_context)?;
+        // 追加排序信息
         let plan = self.order_by(plan, query.order_by, planner_context)?;
+        // 追加offset/limit
         self.limit(plan, query.offset, query.limit)
     }
 
@@ -80,8 +89,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     fn limit(
         &self,
         input: LogicalPlan,
-        skip: Option<SQLOffset>,
-        fetch: Option<SQLExpr>,
+        skip: Option<SQLOffset>,  // 分别代表从哪开始
+        fetch: Option<SQLExpr>,   // 代表拉取多少记录
     ) -> Result<LogicalPlan> {
         if skip.is_none() && fetch.is_none() {
             return Ok(input);
@@ -93,6 +102,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 input.schema(),
                 &mut PlannerContext::new(),
             )? {
+                // skip应该是个常量
                 Expr::Literal(ScalarValue::Int64(Some(s))) => {
                     if s < 0 {
                         return Err(DataFusionError::Plan(format!(
@@ -105,9 +115,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     "Unexpected expression in OFFSET clause".to_string(),
                 )),
             }?,
+
             _ => 0,
         };
 
+        // limit可以为null
         let fetch = match fetch {
             Some(limit_expr)
                 if limit_expr != sqlparser::ast::Expr::Value(Value::Null) =>
@@ -133,21 +145,24 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     /// Wrap the logical in a sort
+    /// 追加order by
     fn order_by(
         &self,
         plan: LogicalPlan,
-        order_by: Vec<OrderByExpr>,
+        order_by: Vec<OrderByExpr>,  // order by 相关的表达式
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         if order_by.is_empty() {
             return Ok(plan);
         }
 
+        // 可能有多个排序列
         let order_by_rex = order_by
             .into_iter()
             .map(|e| self.order_by_to_sort_expr(e, plan.schema(), planner_context))
             .collect::<Result<Vec<_>>>()?;
 
+        // 追加到plan上
         LogicalPlanBuilder::from(plan).sort(order_by_rex)?.build()
     }
 }

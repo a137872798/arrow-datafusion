@@ -427,12 +427,15 @@ pub fn only_or_err<T>(slice: &[T]) -> Result<&T> {
 ///
 /// This is important when optimizing plans to ensure the output
 /// schema of plan nodes don't change after optimization
+/// 改写前后保留名字
 pub fn rewrite_preserving_name<R>(expr: Expr, rewriter: &mut R) -> Result<Expr>
 where
     R: TreeNodeRewriter<N = Expr>,
 {
+    // 如果有别名的话 会返回别名
     let original_name = name_for_alias(&expr)?;
     let expr = expr.rewrite(rewriter)?;
+    // 包装一层别名
     add_alias_if_changed(original_name, expr)
 }
 
@@ -450,6 +453,7 @@ fn name_for_alias(expr: &Expr) -> Result<String> {
 fn add_alias_if_changed(original_name: String, expr: Expr) -> Result<Expr> {
     let new_name = name_for_alias(&expr)?;
 
+    // 别名还在不需要处理
     if new_name == original_name {
         return Ok(expr);
     }
@@ -491,8 +495,10 @@ pub fn merge_schema(inputs: Vec<&LogicalPlan>) -> DFSchema {
 pub(crate) fn extract_join_filters(
     maybe_filter: &LogicalPlan,
 ) -> Result<(Vec<Expr>, LogicalPlan)> {
+    // filter 代表对结果集进行了过滤
     if let LogicalPlan::Filter(plan_filter) = maybe_filter {
         let input_schema = plan_filter.input.schema();
+        // 取出内部的expr
         let subquery_filter_exprs = split_conjunction(&plan_filter.predicate);
 
         let mut join_filters: Vec<Expr> = vec![];

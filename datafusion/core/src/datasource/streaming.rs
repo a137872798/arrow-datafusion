@@ -32,6 +32,7 @@ use crate::physical_plan::streaming::StreamingTableExec;
 use crate::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 
 /// A partition that can be converted into a [`SendableRecordBatchStream`]
+/// 执行后会产生一个数据流
 pub trait PartitionStream: Send + Sync {
     /// Returns the schema of this partition
     fn schema(&self) -> &SchemaRef;
@@ -43,6 +44,7 @@ pub trait PartitionStream: Send + Sync {
 /// A [`TableProvider`] that streams a set of [`PartitionStream`]
 pub struct StreamingTable {
     schema: SchemaRef,
+    // 每个stream对应一个分区
     partitions: Vec<Arc<dyn PartitionStream>>,
     infinite: bool,
 }
@@ -51,8 +53,10 @@ impl StreamingTable {
     /// Try to create a new [`StreamingTable`] returning an error if the schema is incorrect
     pub fn try_new(
         schema: SchemaRef,
-        partitions: Vec<Arc<dyn PartitionStream>>,
+        partitions: Vec<Arc<dyn PartitionStream>>,  // 通过一组流进行初始化
     ) -> Result<Self> {
+
+        // 这些流产生的数据 必须与表的schema兼容
         if !partitions.iter().all(|x| schema.contains(x.schema())) {
             return Err(DataFusionError::Plan(
                 "Mismatch between schema and batches".to_string(),
@@ -66,6 +70,7 @@ impl StreamingTable {
         })
     }
     /// Sets streaming table can be infinite.
+    /// 表能否变成无限的  指的无限流
     pub fn with_infinite_table(mut self, infinite: bool) -> Self {
         self.infinite = infinite;
         self

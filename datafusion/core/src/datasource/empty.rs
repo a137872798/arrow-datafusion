@@ -31,6 +31,7 @@ use crate::physical_plan::project_schema;
 use crate::physical_plan::{empty::EmptyExec, ExecutionPlan};
 
 /// A table with a schema but no data.
+/// 代表一个空表
 pub struct EmptyTable {
     schema: SchemaRef,
     partitions: usize,
@@ -75,6 +76,7 @@ impl TableProvider for EmptyTable {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         // even though there is no data, projections apply
         let projected_schema = project_schema(&self.schema, projection)?;
+        // 直接返回空的执行计划
         Ok(Arc::new(
             EmptyExec::new(false, projected_schema).with_partitions(self.partitions),
         ))

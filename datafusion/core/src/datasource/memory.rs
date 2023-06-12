@@ -42,15 +42,18 @@ use crate::physical_plan::ExecutionPlan;
 use crate::physical_plan::{repartition::RepartitionExec, Partitioning};
 
 /// In-memory table
+/// 内存表
 #[derive(Debug)]
 pub struct MemTable {
     schema: SchemaRef,
+    // 数据直接存储在vec中  最外围代表分区
     batches: Arc<RwLock<Vec<Vec<RecordBatch>>>>,
 }
 
 impl MemTable {
     /// Create a new in-memory table from the provided schema and record batches
     pub fn try_new(schema: SchemaRef, partitions: Vec<Vec<RecordBatch>>) -> Result<Self> {
+        // 确保所有field都出现在table级别的schema中
         if partitions
             .iter()
             .flatten()
@@ -68,6 +71,7 @@ impl MemTable {
     }
 
     /// Create a mem table by reading from another data source
+    /// 从TableProvider中加载数据
     pub async fn load(
         t: Arc<dyn TableProvider>,
         output_partitions: Option<usize>,
@@ -75,12 +79,14 @@ impl MemTable {
     ) -> Result<Self> {
         let schema = t.schema();
         let exec = t.scan(state, None, &[], None).await?;
+        // 获取分区数量
         let partition_count = exec.output_partitioning().partition_count();
 
         let tasks = (0..partition_count)
             .map(|part_i| {
                 let task = state.task_ctx();
                 let exec = exec.clone();
+                // 执行计划 按照分区执行    并行处理
                 let task = tokio::spawn(async move {
                     let stream = exec.execute(part_i, task)?;
                     common::collect(stream).await
@@ -95,19 +101,23 @@ impl MemTable {
         let mut data: Vec<Vec<RecordBatch>> =
             Vec::with_capacity(exec.output_partitioning().partition_count());
 
+        // 查询结果填充到内存中
         for result in futures::future::join_all(tasks).await {
             data.push(result.map_err(|e| DataFusionError::External(Box::new(e)))??)
         }
 
+        // 执行计划中一开始就包含了结果集   本来执行计划应该是要通过execute()得到结果  这里就是直接返回data
         let exec = MemoryExec::try_new(&data, schema.clone(), None)?;
 
         if let Some(num_partitions) = output_partitions {
+            // 对数据进行重分区
             let exec = RepartitionExec::try_new(
                 Arc::new(exec),
                 Partitioning::RoundRobinBatch(num_partitions),
             )?;
 
             // execute and collect results
+            // 存储重新分区的结果
             let mut output_partitions = vec![];
             for i in 0..exec.output_partitioning().partition_count() {
                 // execute this *output* partition and collect all batches
@@ -120,6 +130,7 @@ impl MemTable {
                 output_partitions.push(batches);
             }
 
+            // 基于新的分区结果产生表
             return MemTable::try_new(schema.clone(), output_partitions);
         }
         MemTable::try_new(schema.clone(), data)
@@ -148,6 +159,8 @@ impl TableProvider for MemTable {
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let batches = &self.batches.read().await;
+
+        // 将已经存在的结果集包装成执行计划   执行计划是需要execute() 才能得到结果的
         Ok(Arc::new(MemoryExec::try_new(
             batches,
             self.schema(),
@@ -166,11 +179,14 @@ impl TableProvider for MemTable {
     /// # Returns
     ///
     /// * A `Result` indicating success or failure.
+    /// 执行计划中包含本次要插入的数据   借助它完成数据插入操作
     async fn insert_into(&self, state: &SessionState, input: &LogicalPlan) -> Result<()> {
         // Create a physical plan from the logical plan.
+        // 在执行前 先将逻辑计划变成物理计划
         let plan = state.create_physical_plan(input).await?;
 
         // Check that the schema of the plan matches the schema of this table.
+        // 代表该计划不适用于这张表 无法插入
         if !plan.schema().eq(&self.schema) {
             return Err(DataFusionError::Plan(
                 "Inserting query must have the same schema with the table.".to_string(),
@@ -178,20 +194,27 @@ impl TableProvider for MemTable {
         }
 
         // Get the number of partitions in the plan and the table.
+        // 代表计划的执行可以并行进行  并行度为partition_count
         let plan_partition_count = plan.output_partitioning().partition_count();
+
+        // 第一维代表分区数
         let table_partition_count = self.batches.read().await.len();
 
         // Adjust the plan as necessary to match the number of partitions in the table.
+        // 让分区数保持一致
         let plan: Arc<dyn ExecutionPlan> = if plan_partition_count
             == table_partition_count
             || table_partition_count == 0
         {
+            // 此时不需要调整
             plan
         } else if table_partition_count == 1 {
             // If the table has only one partition, coalesce the partitions in the plan.
+            // 将多分区合并成一个
             Arc::new(CoalescePartitionsExec::new(plan))
         } else {
             // Otherwise, repartition the plan using a round-robin partitioning scheme.
+            // 通过repartition进行再分区
             Arc::new(RepartitionExec::try_new(
                 plan,
                 Partitioning::RoundRobinBatch(table_partition_count),
@@ -203,6 +226,7 @@ impl TableProvider for MemTable {
 
         // Execute the plan and collect the results into batches.
         let mut tasks = vec![];
+        // 根据分区数 并行执行任务
         for idx in 0..plan.output_partitioning().partition_count() {
             let stream = plan.execute(idx, task_ctx.clone())?;
             let handle = task::spawn(async move {
@@ -210,6 +234,8 @@ impl TableProvider for MemTable {
             });
             tasks.push(AbortOnDropSingle::new(handle));
         }
+
+        // 此时已经得到结果了
         let results = futures::future::join_all(tasks)
             .await
             .into_iter()
@@ -224,6 +250,7 @@ impl TableProvider for MemTable {
         if all_batches.is_empty() {
             *all_batches = results
         } else {
+            // 将相同分区的数据合并
             for (batches, result) in all_batches.iter_mut().zip(results.into_iter()) {
                 batches.extend(result);
             }

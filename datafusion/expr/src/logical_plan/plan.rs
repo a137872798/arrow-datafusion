@@ -51,10 +51,12 @@ use std::sync::Arc;
 /// an output relation (table) with a (potentially) different
 /// schema. A plan represents a dataflow tree where data flows
 /// from leaves up to the root to produce the query result.
+/// 逻辑计划 逻辑计划好像也是可以嵌套的 也就是简单的对应expr 复杂的对应逻辑计划
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum LogicalPlan {
     /// Evaluates an arbitrary list of expressions (essentially a
     /// SELECT with an expression list) on its input.
+    /// 使用一组表达式 对输入的执行计划做处理
     Projection(Projection),
     /// Filters rows from its input that do not match an
     /// expression (essentially a WHERE clause with a predicate
@@ -63,75 +65,76 @@ pub enum LogicalPlan {
     /// Semantically, `<predicate>` is evaluated for each row of the input;
     /// If the value of `<predicate>` is true, the input row is passed to
     /// the output. If the value of `<predicate>` is false, the row is
-    /// discarded.
+    /// discarded.   对逻辑计划的结果进行过滤  实际上where部分就会被解析成filter
     Filter(Filter),
-    /// Window its input based on a set of window spec and window function (e.g. SUM or RANK)
+    /// Window its input based on a set of window spec and window function (e.g. SUM or RANK)   将窗口函数作用到逻辑计划的结果上
     Window(Window),
     /// Aggregates its input based on a set of grouping and aggregate
-    /// expressions (e.g. SUM).
+    /// expressions (e.g. SUM).   聚合函数作用到逻辑计划结果上
     Aggregate(Aggregate),
-    /// Sorts its input according to a list of sort expressions.
+    /// Sorts its input according to a list of sort expressions.   对结果进行排序
     Sort(Sort),
-    /// Join two logical plans on one or more join columns
+    /// Join two logical plans on one or more join columns    join执行计划
     Join(Join),
-    /// Apply Cross Join to two logical plans
+    /// Apply Cross Join to two logical plans    TODO
     CrossJoin(CrossJoin),
-    /// Repartition the plan based on a partitioning scheme.
+    /// Repartition the plan based on a partitioning scheme.   对结果集进行再分区
     Repartition(Repartition),
-    /// Union multiple inputs
+    /// Union multiple inputs   合并多个输入结果
     Union(Union),
-    /// Produces rows from a table provider by reference or from the context
+    /// Produces rows from a table provider by reference or from the context   通过表或者上下文产生数据集
     TableScan(TableScan),
-    /// Produces no rows: An empty relation with an empty schema
+    /// Produces no rows: An empty relation with an empty schema    产生空数据
     EmptyRelation(EmptyRelation),
     /// Subquery
     Subquery(Subquery),
     /// Aliased relation provides, or changes, the name of a relation.
     SubqueryAlias(SubqueryAlias),
-    /// Skip some number of rows, and then fetch some number of rows.
+    /// Skip some number of rows, and then fetch some number of rows.   对查询结果做数量限制
     Limit(Limit),
-    /// [`Statement`]
+    /// [`Statement`]       代表开启/结束一个事务  或者设置一个值
     Statement(Statement),
-    /// Creates an external table.
+    /// Creates an external table.      创建外部表的逻辑计划
     CreateExternalTable(CreateExternalTable),
-    /// Creates an in memory table.
+    /// Creates an in memory table.      创建一个内存表
     CreateMemoryTable(CreateMemoryTable),
-    /// Creates a new view.
+    /// Creates a new view.            创建一个新视图
     CreateView(CreateView),
-    /// Creates a new catalog schema.
+    /// Creates a new catalog schema.      创建一个schema
     CreateCatalogSchema(CreateCatalogSchema),
-    /// Creates a new catalog (aka "Database").
+    /// Creates a new catalog (aka "Database").   创建catalog    catalog->schema->table  是这样的级别关系
     CreateCatalog(CreateCatalog),
-    /// Drops a table.
+    /// Drops a table.   删除表
     DropTable(DropTable),
-    /// Drops a view.
+    /// Drops a view.    删除视图
     DropView(DropView),
     /// Values expression. See
     /// [Postgres VALUES](https://www.postgresql.org/docs/current/queries-values.html)
-    /// documentation for more details.
+    /// documentation for more details.  存储一些结果值
     Values(Values),
     /// Produces a relation with string representations of
-    /// various parts of the plan
+    /// various parts of the plan      表示计划不同部分的关系
     Explain(Explain),
     /// Runs the actual plan, and then prints the physical plan with
-    /// with execution metrics.
+    /// with execution metrics.    运行实际的计划
     Analyze(Analyze),
-    /// Extension operator defined outside of DataFusion
+    /// Extension operator defined outside of DataFusion   一些额外的操作  拓展功能目前没有内置实现  先忽略
     Extension(Extension),
-    /// Remove duplicate rows from the input
+    /// Remove duplicate rows from the input      对输入的数据集进行去重
     Distinct(Distinct),
     /// Prepare a statement
     Prepare(Prepare),
-    /// Insert / Update / Delete
+    /// Insert / Update / Delete    DML操作
     Dml(DmlStatement),
-    /// Describe the schema of table
+    /// Describe the schema of table   产生表的描述信息
     DescribeTable(DescribeTable),
-    /// Unnest a column that contains a nested list type.
+    /// Unnest a column that contains a nested list type.    针对List类型 抽取出内部元素类型
     Unnest(Unnest),
 }
 
 impl LogicalPlan {
     /// Get a reference to the logical plan's schema
+    /// 从plan中解析出schema
     pub fn schema(&self) -> &DFSchemaRef {
         match self {
             LogicalPlan::EmptyRelation(EmptyRelation { schema, .. }) => schema,
@@ -177,7 +180,7 @@ impl LogicalPlan {
     }
 
     /// Used for normalizing columns, as the fallback schemas to the main schema
-    /// of the plan.
+    /// of the plan.   作为主schema的备选方案
     pub fn fallback_normalize_schemas(&self) -> Vec<&DFSchema> {
         match self {
             LogicalPlan::Window(_)
@@ -195,6 +198,7 @@ impl LogicalPlan {
     }
 
     /// Get all meaningful schemas of a plan and its children plan.
+    /// 获取计划以及子计划下所有有意义的schema
     #[deprecated(since = "20.0.0")]
     pub fn all_schemas(&self) -> Vec<&DFSchemaRef> {
         match self {
@@ -211,7 +215,7 @@ impl LogicalPlan {
                 });
                 schemas
             }
-            // just return self.schema()
+            // just return self.schema()    这些是没有子计划的意思吗
             LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
             | LogicalPlan::EmptyRelation(_)
@@ -226,7 +230,7 @@ impl LogicalPlan {
             | LogicalPlan::TableScan(_) => {
                 vec![self.schema()]
             }
-            // return children schemas
+            // return children schemas    仅子计划包含有效schema
             LogicalPlan::Limit(_)
             | LogicalPlan::Subquery(_)
             | LogicalPlan::Repartition(_)
@@ -247,6 +251,7 @@ impl LogicalPlan {
     }
 
     /// Returns the (fixed) output schema for explain plans
+    /// 返回explain plans的schema
     pub fn explain_schema() -> SchemaRef {
         SchemaRef::new(Schema::new(vec![
             Field::new("plan_type", DataType::Utf8, false),
@@ -257,6 +262,7 @@ impl LogicalPlan {
     /// returns all expressions (non-recursively) in the current
     /// logical plan node. This does not include expressions in any
     /// children
+    /// 返回当前节点的所有表达式 不包含子节点的部分
     pub fn expressions(self: &LogicalPlan) -> Vec<Expr> {
         let mut exprs = vec![];
         self.inspect_expressions(|e| {
@@ -270,9 +276,11 @@ impl LogicalPlan {
 
     /// Returns all the out reference(correlated) expressions (recursively) in the current
     /// logical plan nodes and all its descendant nodes.
+    /// 找到每个表达式的外部表达式
     pub fn all_out_ref_exprs(self: &LogicalPlan) -> Vec<Expr> {
         let mut exprs = vec![];
         self.inspect_expressions(|e| {
+            // 目前仅针对 OuterReferenceColumn 类型
             find_out_reference_exprs(e).into_iter().for_each(|e| {
                 if !exprs.contains(&e) {
                     exprs.push(e)
@@ -282,6 +290,7 @@ impl LogicalPlan {
         })
         // closure always returns OK
         .unwrap();
+        // 还会作用到子节点上
         self.inputs()
             .into_iter()
             .flat_map(|child| child.all_out_ref_exprs())
@@ -296,6 +305,7 @@ impl LogicalPlan {
     /// Calls `f` on all expressions (non-recursively) in the current
     /// logical plan node. This does not include expressions in any
     /// children.
+    /// 遍历表达式
     pub fn inspect_expressions<F, E>(self: &LogicalPlan, mut f: F) -> Result<(), E>
     where
         F: FnMut(&Expr) -> Result<(), E>,
@@ -419,18 +429,21 @@ impl LogicalPlan {
     }
 
     /// returns all `Using` join columns in a logical plan
+    /// 该方法仅针对 Join类型
     pub fn using_columns(&self) -> Result<Vec<HashSet<Column>>, DataFusionError> {
         let mut using_columns: Vec<HashSet<Column>> = vec![];
 
+        // 将该函数作用到每个节点上 采集join on的列   还会作用到子节点上
         self.apply(&mut |plan| {
             if let LogicalPlan::Join(Join {
                 join_constraint: JoinConstraint::Using,
-                on,
+                on,  // 找到join
                 ..
             }) = plan
             {
                 // The join keys in using-join must be columns.
                 let columns =
+                // 对应join on的字段
                     on.iter().try_fold(HashSet::new(), |mut accumu, (l, r)| {
                         accumu.insert(l.try_into_col()?);
                         accumu.insert(r.try_into_col()?);
@@ -444,12 +457,15 @@ impl LogicalPlan {
         Ok(using_columns)
     }
 
+    /// 简单看就是替换内部的执行计划 生成新的plan
     pub fn with_new_inputs(&self, inputs: &[LogicalPlan]) -> Result<LogicalPlan> {
         from_plan(self, &self.expressions(), inputs)
     }
 
     /// Convert a prepared [`LogicalPlan`] into its inner logical plan
     /// with all params replaced with their corresponding values
+    /// 替换内部的标量值
+    /// 这些函数 一般都只能作用在特定的plan上
     pub fn with_param_values(
         self,
         param_values: Vec<ScalarValue>,
@@ -457,6 +473,7 @@ impl LogicalPlan {
         match self {
             LogicalPlan::Prepare(prepare_lp) => {
                 // Verify if the number of params matches the number of values
+                // 首先要长度匹配
                 if prepare_lp.data_types.len() != param_values.len() {
                     return Err(DataFusionError::Internal(format!(
                         "Expected {} parameters, got {}",
@@ -468,6 +485,7 @@ impl LogicalPlan {
                 // Verify if the types of the params matches the types of the values
                 let iter = prepare_lp.data_types.iter().zip(param_values.iter());
                 for (i, (param_type, value)) in iter.enumerate() {
+                    // 其次要类型匹配
                     if *param_type != value.get_datatype() {
                         return Err(DataFusionError::Internal(format!(
                             "Expected parameter of type {:?}, got {:?} at index {}",
@@ -479,6 +497,7 @@ impl LogicalPlan {
                 }
 
                 let input_plan = prepare_lp.input;
+                // 替换参数
                 input_plan.replace_params_with_values(&param_values)
             }
             _ => Ok(self),
@@ -488,14 +507,17 @@ impl LogicalPlan {
 
 impl LogicalPlan {
     /// applies collect to any subqueries in the plan
+    /// 将f作用到子查询上
     pub(crate) fn apply_subqueries<F>(&self, op: &mut F) -> datafusion_common::Result<()>
     where
         F: FnMut(&Self) -> datafusion_common::Result<VisitRecursion>,
     {
+        // 遍历所有表达式
         self.inspect_expressions(|expr| {
             // recursively look for subqueries
             inspect_expr_pre(expr, |expr| {
                 match expr {
+                    // 处理子查询
                     Expr::Exists { subquery, .. }
                     | Expr::InSubquery { subquery, .. }
                     | Expr::ScalarSubquery(subquery) => {
@@ -514,6 +536,7 @@ impl LogicalPlan {
     }
 
     /// applies visitor to any subqueries in the plan
+    /// plan作为TreeNode时 处理子节点前会触发该方法
     pub(crate) fn visit_subqueries<V>(&self, v: &mut V) -> datafusion_common::Result<()>
     where
         V: TreeNodeVisitor<N = LogicalPlan>,
@@ -542,16 +565,19 @@ impl LogicalPlan {
     /// Return a logical plan with all placeholders/params (e.g $1 $2,
     /// ...) replaced with corresponding values provided in the
     /// params_values
+    /// 替换logicalPlan内的参数
     pub fn replace_params_with_values(
         &self,
         param_values: &[ScalarValue],
     ) -> Result<LogicalPlan> {
+        // 替换表达式中的参数
         let new_exprs = self
             .expressions()
             .into_iter()
             .map(|e| Self::replace_placeholders_with_values(e, param_values))
             .collect::<Result<Vec<_>>>()?;
 
+        // 递归替换logicalPlan内部的参数
         let new_inputs_with_values = self
             .inputs()
             .into_iter()
@@ -562,6 +588,7 @@ impl LogicalPlan {
     }
 
     /// Walk the logical plan, find any `PlaceHolder` tokens, and return a map of their IDs and DataTypes
+    /// 解析参数类型
     pub fn get_parameter_types(
         &self,
     ) -> Result<HashMap<String, Option<DataType>>, DataFusionError> {
@@ -570,6 +597,7 @@ impl LogicalPlan {
         self.apply(&mut |plan| {
             plan.inspect_expressions(|expr| {
                 expr.apply(&mut |expr| {
+                    // 仅针对占位符类型
                     if let Expr::Placeholder { id, data_type } = expr {
                         let prev = param_types.get(id);
                         match (prev, data_type) {
@@ -598,25 +626,31 @@ impl LogicalPlan {
 
     /// Return an Expr with all placeholders replaced with their
     /// corresponding values provided in the params_values
+    /// 替换表达式内部的参数
     fn replace_placeholders_with_values(
         expr: Expr,
         param_values: &[ScalarValue],
     ) -> Result<Expr> {
+        // expr也作为一个节点
         expr.transform(&|expr| {
             match &expr {
+                // 先只看占位符
                 Expr::Placeholder { id, data_type } => {
+                    // 错误的占位符标记
                     if id.is_empty() || id == "$0" {
                         return Err(DataFusionError::Plan(
                             "Empty placeholder id".to_string(),
                         ));
                     }
                     // convert id (in format $1, $2, ..) to idx (0, 1, ..)
+                    // 将占位符 转换成下标
                     let idx = id[1..].parse::<usize>().map_err(|e| {
                         DataFusionError::Internal(format!(
                             "Failed to parse placeholder id: {e}"
                         ))
                     })? - 1;
                     // value at the idx-th position in param_values should be the value for the placeholder
+                    // 取出对应的参数值
                     let value = param_values.get(idx).ok_or_else(|| {
                         DataFusionError::Internal(format!(
                             "No value found for placeholder with id {id}"
@@ -631,6 +665,7 @@ impl LogicalPlan {
                         )));
                     }
                     // Replace the placeholder with the value
+                    // 产生一个转换成功的结果 内部包含最新的value值
                     Ok(Transformed::Yes(Expr::Literal(value.clone())))
                 }
                 Expr::ScalarSubquery(qry) => {
@@ -1169,7 +1204,7 @@ pub enum JoinConstraint {
     Using,
 }
 
-/// Creates a catalog (aka "Database").
+/// Creates a catalog (aka "Database").   创建一个数据库
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CreateCatalog {
     /// The catalog name
@@ -1180,10 +1215,10 @@ pub struct CreateCatalog {
     pub schema: DFSchemaRef,
 }
 
-/// Creates a schema.
+/// Creates a schema.   创建一个schema
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CreateCatalogSchema {
-    /// The table schema
+    /// The table schema      schema名称
     pub schema_name: String,
     /// Do nothing (except issuing a notice) if a schema with the same name already exists
     pub if_not_exists: bool,
@@ -1191,7 +1226,7 @@ pub struct CreateCatalogSchema {
     pub schema: DFSchemaRef,
 }
 
-/// Drops a table.
+/// Drops a table.   删除某个表
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DropTable {
     /// The table name
@@ -1202,7 +1237,7 @@ pub struct DropTable {
     pub schema: DFSchemaRef,
 }
 
-/// Drops a view.
+/// Drops a view.   删除一个视图
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DropView {
     /// The view name
@@ -1234,16 +1269,17 @@ pub struct Values {
 }
 
 /// Evaluates an arbitrary list of expressions (essentially a
-/// SELECT with an expression list) on its input.
+/// SELECT with an expression list) on its input.    也是代理模式
+/// 代表一个映射操作 一组表达式会作用到输入上 输入就是逻辑计划
 #[derive(Clone, PartialEq, Eq, Hash)]
 // mark non_exhaustive to encourage use of try_new/new()
 #[non_exhaustive]
 pub struct Projection {
-    /// The list of expressions
+    /// The list of expressions    这组表达式会作用到逻辑计划上
     pub expr: Vec<Expr>,
     /// The incoming logical plan
     pub input: Arc<LogicalPlan>,
-    /// The schema description of the output
+    /// The schema description of the output   描述输出结果
     pub schema: DFSchemaRef,
 }
 
@@ -1316,6 +1352,7 @@ impl SubqueryAlias {
     ) -> Result<Self> {
         let alias = alias.into();
         let schema: Schema = plan.schema().as_ref().clone().into();
+        // 将schema下的field绑定的table-ref改变了
         let schema =
             DFSchemaRef::new(DFSchema::try_from_qualified_schema(&alias, &schema)?);
         Ok(SubqueryAlias {
@@ -1340,9 +1377,9 @@ impl SubqueryAlias {
 #[derive(Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Filter {
-    /// The predicate expression, which must have Boolean type.
+    /// The predicate expression, which must have Boolean type.  过滤不满足表达式的结果
     pub predicate: Expr,
-    /// The incoming logical plan
+    /// The incoming logical plan    逻辑计划调用后应该会产生一个结果
     pub input: Arc<LogicalPlan>,
 }
 
@@ -1382,30 +1419,32 @@ impl Filter {
 }
 
 /// Window its input based on a set of window spec and window function (e.g. SUM or RANK)
+/// 将窗口函数作用到逻辑计划上
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Window {
     /// The incoming logical plan
     pub input: Arc<LogicalPlan>,
-    /// The window function expression
+    /// The window function expression  内部一组窗口函数
     pub window_expr: Vec<Expr>,
-    /// The schema description of the window output
+    /// The schema description of the window output   描述输出结果的表结构
     pub schema: DFSchemaRef,
 }
 
 /// Produces rows from a table provider by reference or from the context
+/// 通过表或者上下文  产生结果集
 #[derive(Clone)]
 pub struct TableScan {
-    /// The name of the table
+    /// The name of the table     描述表的名称
     pub table_name: OwnedTableReference,
-    /// The source of the table
+    /// The source of the table     每个tableSource 会绑定一个逻辑计划
     pub source: Arc<dyn TableSource>,
-    /// Optional column indices to use as a projection
+    /// Optional column indices to use as a projection    用于投影的可选列下标   或者说本次查询只需要哪些列
     pub projection: Option<Vec<usize>>,
-    /// The schema description of the output
+    /// The schema description of the output      输出结果对应的结构
     pub projected_schema: DFSchemaRef,
-    /// Optional expressions to be used as filters by the table provider
+    /// Optional expressions to be used as filters by the table provider   对输出结果起过滤作用
     pub filters: Vec<Expr>,
-    /// Optional number of rows to read
+    /// Optional number of rows to read    本次查询结果数量上限
     pub fetch: Option<usize>,
 }
 
@@ -1443,15 +1482,16 @@ pub struct CrossJoin {
 }
 
 /// Repartition the plan based on a partitioning scheme.
+/// 重分区对象
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Repartition {
-    /// The incoming logical plan
+    /// The incoming logical plan     输入的逻辑计划
     pub input: Arc<LogicalPlan>,
-    /// The partitioning scheme
+    /// The partitioning scheme       该对象可以对结果进行分区
     pub partitioning_scheme: Partitioning,
 }
 
-/// Union multiple inputs
+/// Union multiple inputs   将多个输入结果进行合并
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Union {
     /// Inputs to merge
@@ -1460,22 +1500,22 @@ pub struct Union {
     pub schema: DFSchemaRef,
 }
 
-/// Creates an in memory table.
+/// Creates an in memory table.  创建一个内存表
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CreateMemoryTable {
-    /// The table name
+    /// The table name        表名
     pub name: OwnedTableReference,
     /// The ordered list of columns in the primary key, or an empty vector if none
     pub primary_key: Vec<Column>,
-    /// The logical plan
+    /// The logical plan  可以为空 代表创建空表 也可以对应一个查询语句 代表将查询结果作为表的基础数据
     pub input: Arc<LogicalPlan>,
     /// Option to not error if table already exists
     pub if_not_exists: bool,
-    /// Option to replace table content if table already exists
+    /// Option to replace table content if table already exists    表存在时是否替换内容
     pub or_replace: bool,
 }
 
-/// Creates a view.
+/// Creates a view.    创建一个新视图
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CreateView {
     /// The table name
@@ -1488,32 +1528,32 @@ pub struct CreateView {
     pub definition: Option<String>,
 }
 
-/// Creates an external table.
+/// Creates an external table.   创建一个外部表
 #[derive(Clone, PartialEq, Eq)]
 pub struct CreateExternalTable {
-    /// The table schema
+    /// The table schema     表结构
     pub schema: DFSchemaRef,
-    /// The table name
+    /// The table name     描述表名
     pub name: OwnedTableReference,
-    /// The physical location
+    /// The physical location    表所在的物理位置 (ObjectStore)
     pub location: String,
-    /// The file type of physical file
+    /// The file type of physical file    物理文件类型
     pub file_type: String,
-    /// Whether the CSV file contains a header
+    /// Whether the CSV file contains a header   是否包含文件头
     pub has_header: bool,
-    /// Delimiter for CSV
+    /// Delimiter for CSV    文件分隔符
     pub delimiter: char,
-    /// Partition Columns
+    /// Partition Columns     表通过这些列进行分区
     pub table_partition_cols: Vec<String>,
-    /// Option to not error if table already exists
+    /// Option to not error if table already exists  当表已经存在时是否要报错
     pub if_not_exists: bool,
-    /// SQL used to create the table, if available
+    /// SQL used to create the table, if available  建表语句
     pub definition: Option<String>,
-    /// Order expressions supplied by user
+    /// Order expressions supplied by user     用户提供了一些顺序表达式
     pub order_exprs: Vec<Expr>,
-    /// File compression type (GZIP, BZIP2, XZ, ZSTD)
+    /// File compression type (GZIP, BZIP2, XZ, ZSTD)      文件的压缩类型
     pub file_compression_type: CompressionTypeVariant,
-    /// Table(provider) specific options
+    /// Table(provider) specific options   表的特定选项
     pub options: HashMap<String, String>,
 }
 
@@ -1538,6 +1578,7 @@ impl Hash for CreateExternalTable {
 
 /// Prepare a statement but do not execute it. Prepare statements can have 0 or more
 /// `Expr::Placeholder` expressions that are filled in during execution
+/// 准备一个会话对象
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Prepare {
     /// The name of the statement
@@ -1561,20 +1602,20 @@ pub struct DescribeTable {
 /// various parts of the plan
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Explain {
-    /// Should extra (detailed, intermediate plans) be included?
+    /// Should extra (detailed, intermediate plans) be included?     是否应该包含(详细，中间)的计划
     pub verbose: bool,
-    /// The logical plan that is being EXPLAIN'd
+    /// The logical plan that is being EXPLAIN'd         被解释的逻辑计划
     pub plan: Arc<LogicalPlan>,
-    /// Represent the various stages plans have gone through
+    /// Represent the various stages plans have gone through   逻辑计划经历的各个阶段
     pub stringified_plans: Vec<StringifiedPlan>,
-    /// The output schema of the explain (2 columns of text)
+    /// The output schema of the explain (2 columns of text)     代表结果对应的schema
     pub schema: DFSchemaRef,
     /// Used by physical planner to check if should proceed with planning
     pub logical_optimization_succeeded: bool,
 }
 
 /// Runs the actual plan, and then prints the physical plan with
-/// with execution metrics.
+/// with execution metrics.   运行实际计划
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Analyze {
     /// Should extra detail be included?
@@ -1603,18 +1644,19 @@ impl PartialEq for Extension {
 }
 
 /// Produces the first `n` tuples from its input and discards the rest.
+/// 对查询结果做数量限制
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Limit {
-    /// Number of rows to skip before fetch
+    /// Number of rows to skip before fetch   要跳过前面多少条
     pub skip: usize,
     /// Maximum number of rows to fetch,
-    /// None means fetching all rows
+    /// None means fetching all rows   总计拉取多少条
     pub fetch: Option<usize>,
-    /// The logical plan
+    /// The logical plan            用于产生结果集
     pub input: Arc<LogicalPlan>,
 }
 
-/// Removes duplicate rows from the input
+/// Removes duplicate rows from the input    对输入行进行去重
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Distinct {
     /// The logical plan that is being DISTINCT'd
@@ -1627,13 +1669,13 @@ pub struct Distinct {
 // mark non_exhaustive to encourage use of try_new/new()
 #[non_exhaustive]
 pub struct Aggregate {
-    /// The incoming logical plan
+    /// The incoming logical plan    逻辑计划
     pub input: Arc<LogicalPlan>,
-    /// Grouping expressions
+    /// Grouping expressions     可能要先分组
     pub group_expr: Vec<Expr>,
-    /// Aggregate expressions
+    /// Aggregate expressions    使用聚合函数处理结果
     pub aggr_expr: Vec<Expr>,
-    /// The schema description of the aggregate output
+    /// The schema description of the aggregate output    描述聚合结果的结构
     pub schema: DFSchemaRef,
 }
 
@@ -1699,42 +1741,42 @@ impl Aggregate {
 /// Sorts its input according to a list of sort expressions.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Sort {
-    /// The sort expressions
+    /// The sort expressions   排序键
     pub expr: Vec<Expr>,
-    /// The incoming logical plan
+    /// The incoming logical plan   可以产生结果的逻辑计划
     pub input: Arc<LogicalPlan>,
-    /// Optional fetch limit
+    /// Optional fetch limit    是否限制了结果条数
     pub fetch: Option<usize>,
 }
 
 /// Join two logical plans on one or more join columns
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Join {
-    /// Left input
+    /// Left input    左侧对应一个查询语句
     pub left: Arc<LogicalPlan>,
-    /// Right input
+    /// Right input    右侧对应另一个查询语句
     pub right: Arc<LogicalPlan>,
-    /// Equijoin clause expressed as pairs of (left, right) join expressions
+    /// Equijoin clause expressed as pairs of (left, right) join expressions   对应用于连接的列
     pub on: Vec<(Expr, Expr)>,
-    /// Filters applied during join (non-equi conditions)
+    /// Filters applied during join (non-equi conditions)   在join后 通过filter来过滤数据
     pub filter: Option<Expr>,
-    /// Join type
+    /// Join type        代表连接类型
     pub join_type: JoinType,
-    /// Join constraint
+    /// Join constraint         JOIN ON
     pub join_constraint: JoinConstraint,
-    /// The output schema, containing fields from the left and right inputs
+    /// The output schema, containing fields from the left and right inputs    join后数据输出结果格式
     pub schema: DFSchemaRef,
-    /// If null_equals_null is true, null == null else null != null
+    /// If null_equals_null is true, null == null else null != null     表示null是否等于null
     pub null_equals_null: bool,
 }
 
 impl Join {
     /// Create Join with input which wrapped with projection, this method is used to help create physical join.
     pub fn try_new_with_project_input(
-        original: &LogicalPlan,
-        left: Arc<LogicalPlan>,
+        original: &LogicalPlan,  // 原逻辑计划
+        left: Arc<LogicalPlan>,  // 左右分别套上投影
         right: Arc<LogicalPlan>,
-        column_on: (Vec<Column>, Vec<Column>),
+        column_on: (Vec<Column>, Vec<Column>),  // 已经加工过 确保内部都是 column类型了
     ) -> Result<Self> {
         let original_join = match original {
             LogicalPlan::Join(join) => join,
@@ -1747,6 +1789,8 @@ impl Join {
             .zip(column_on.1.into_iter())
             .map(|(l, r)| (Expr::Column(l), Expr::Column(r)))
             .collect();
+
+        // 根据左右2个schema 推断最终的schema
         let join_schema =
             build_join_schema(left.schema(), right.schema(), &original_join.join_type)?;
 
@@ -1766,9 +1810,9 @@ impl Join {
 /// Subquery
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Subquery {
-    /// The subquery
+    /// The subquery    对应一个子查询  逻辑计划可以理解为一个完整的sql语句 能够产生结果
     pub subquery: Arc<LogicalPlan>,
-    /// The outer references used in the subquery
+    /// The outer references used in the subquery   子查询使用的外部引用
     pub outer_ref_columns: Vec<Expr>,
 }
 
@@ -1799,16 +1843,19 @@ impl Debug for Subquery {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Partitioning {
     /// Allocate batches using a round-robin algorithm and the specified number of partitions
+    /// 通过轮询算法
     RoundRobinBatch(usize),
     /// Allocate rows based on a hash of one of more expressions and the specified number
-    /// of partitions.
+    /// of partitions.   通过hash算法
     Hash(Vec<Expr>, usize),
     /// The DISTRIBUTE BY clause is used to repartition the data based on the input expressions
+    /// 基于输入的表达式 对逻辑计划的结果进行重新分区
     DistributeBy(Vec<Expr>),
 }
 
 /// Represents which type of plan, when storing multiple
 /// for use in EXPLAIN plans
+/// 逻辑计划所经历的各个阶段 对应下面的枚举
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PlanType {
     /// The initial LogicalPlan provided to DataFusion
@@ -1895,12 +1942,12 @@ pub trait ToStringifiedPlan {
     fn to_stringified(&self, plan_type: PlanType) -> StringifiedPlan;
 }
 
-/// Unnest a column that contains a nested list type.
+/// Unnest a column that contains a nested list type.   解除嵌套结构
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Unnest {
     /// The incoming logical plan
     pub input: Arc<LogicalPlan>,
-    /// The column to unnest
+    /// The column to unnest        被取消嵌套的列
     pub column: Column,
     /// The output schema, containing the unnested field column.
     pub schema: DFSchemaRef,

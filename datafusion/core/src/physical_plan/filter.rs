@@ -48,9 +48,9 @@ use futures::stream::{Stream, StreamExt};
 /// include in its output batches.
 #[derive(Debug)]
 pub struct FilterExec {
-    /// The expression to filter on. This expression must evaluate to a boolean value.
+    /// The expression to filter on. This expression must evaluate to a boolean value.  作用到数据集上会产生一个BooleanArray 代表需要保留哪些数据
     predicate: Arc<dyn PhysicalExpr>,
-    /// The input plan
+    /// The input plan  用于产生结果的物理计划
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
@@ -62,6 +62,8 @@ impl FilterExec {
         predicate: Arc<dyn PhysicalExpr>,
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
+
+        // 谓语作用后的结果必须是boolean类型
         match predicate.data_type(input.schema().as_ref())? {
             DataType::Boolean => Ok(Self {
                 predicate,
@@ -126,6 +128,8 @@ impl ExecutionPlan for FilterExec {
         // Combine the equal predicates with the input equivalence properties
         let mut input_properties = self.input.equivalence_properties();
         let (equal_pairs, _ne_pairs) = collect_columns_from_predicate(&self.predicate);
+
+        // 将相等的列 追加到input_properties中
         for new_condition in equal_pairs {
             input_properties.add_equal_conditions(new_condition)
         }
@@ -235,16 +239,19 @@ struct FilterExecStream {
     baseline_metrics: BaselineMetrics,
 }
 
+// 对数据集进行过滤
 pub(crate) fn batch_filter(
     batch: &RecordBatch,
     predicate: &Arc<dyn PhysicalExpr>,
 ) -> Result<RecordBatch> {
+    // 将谓语作用到数据集上  产生一组表示结果的boolean值
     predicate
         .evaluate(batch)
         .map(|v| v.into_array(batch.num_rows()))
         .and_then(|array| {
             Ok(as_boolean_array(&array)?)
                 // apply filter array to record batch
+                // 将结果与数据集放在一起  这样遇到false的数据不会生效
                 .and_then(|filter_array| Ok(filter_record_batch(batch, filter_array)?))
         })
 }
@@ -302,6 +309,7 @@ fn collect_columns_from_predicate(predicate: &Arc<dyn PhysicalExpr>) -> EqualAnd
     let mut eq_predicate_columns: Vec<(&Column, &Column)> = Vec::new();
     let mut ne_predicate_columns: Vec<(&Column, &Column)> = Vec::new();
 
+    // split_conjunction只会拆解 AND的二元表达式
     let predicates = split_conjunction(predicate);
     predicates.into_iter().for_each(|p| {
         if let Some(binary) = p.as_any().downcast_ref::<BinaryExpr>() {
@@ -310,6 +318,7 @@ fn collect_columns_from_predicate(predicate: &Arc<dyn PhysicalExpr>) -> EqualAnd
             if left.as_any().is::<Column>() && right.as_any().is::<Column>() {
                 let left_column = left.as_any().downcast_ref::<Column>().unwrap();
                 let right_column = right.as_any().downcast_ref::<Column>().unwrap();
+                // 根据操作类型  将相等的col 不想等的col 分开存放
                 match binary.op() {
                     Operator::Eq => {
                         eq_predicate_columns.push((left_column, right_column))

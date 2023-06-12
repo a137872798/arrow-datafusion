@@ -34,11 +34,11 @@ use datafusion_expr::Accumulator;
 use std::any::Any;
 use std::sync::Arc;
 
-/// CORR aggregate expression
+/// CORR aggregate expression   相关如何体现出聚合？
 #[derive(Debug)]
 pub struct Correlation {
-    name: String,
-    expr1: Arc<dyn PhysicalExpr>,
+    name: String,    // 聚合字段名称
+    expr1: Arc<dyn PhysicalExpr>,   // 其他聚合表达式内部只有一个PhysicalExpr 并且不会被使用
     expr2: Arc<dyn PhysicalExpr>,
 }
 

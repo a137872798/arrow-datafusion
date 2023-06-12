@@ -39,10 +39,10 @@ use super::binary::{
     ts_scalar_interval_op, ts_scalar_ts_op,
 };
 
-/// Perform DATE/TIME/TIMESTAMP +/ INTERVAL math
+/// Perform DATE/TIME/TIMESTAMP +/ INTERVAL math     对应一个时间+-一个值的场景
 #[derive(Debug)]
 pub struct DateTimeIntervalExpr {
-    lhs: Arc<dyn PhysicalExpr>,
+    lhs: Arc<dyn PhysicalExpr>,    // 左右2边还是表达式
     op: Operator,
     rhs: Arc<dyn PhysicalExpr>,
     // TODO: move type checking to the planning phase and not in the physical expr
@@ -114,6 +114,7 @@ impl PhysicalExpr for DateTimeIntervalExpr {
     }
 
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
+        // 这是在推断最终类型
         coerce_types(
             &self.lhs.data_type(input_schema)?,
             &Operator::Minus,
@@ -165,6 +166,7 @@ impl PhysicalExpr for DateTimeIntervalExpr {
         }
     }
 
+    // 推断值的范围
     fn evaluate_bounds(&self, children: &[&Interval]) -> Result<Interval> {
         // Get children intervals:
         let left_interval = children[0];
@@ -223,6 +225,7 @@ impl PartialEq<dyn Any> for DateTimeIntervalExpr {
     }
 }
 
+// array与单个值的操作
 pub fn evaluate_temporal_array(
     array: ArrayRef,
     sign: i32,
@@ -232,6 +235,7 @@ pub fn evaluate_temporal_array(
         // Date +- Interval
         (DataType::Date32, DataType::Interval(_)) => {
             let array = as_date32_array(&array)?;
+            // 每个元素都增加值
             let ret = Arc::new(try_unary::<Date32Type, _, Date32Type>(array, |days| {
                 Ok(date32_add(days, scalar, sign)?)
             })?) as ArrayRef;

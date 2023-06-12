@@ -87,7 +87,7 @@ pub struct NestedLoopJoinExec {
     pub(crate) join_type: JoinType,
     /// The schema once the join is applied
     schema: SchemaRef,
-    /// Build-side data
+    /// Build-side data  简单理解就是RecordBatch
     inner_table: OnceAsync<JoinLeftData>,
     /// Information of index and left / right placement of columns
     column_indices: Vec<ColumnIndex>,
@@ -98,18 +98,23 @@ pub struct NestedLoopJoinExec {
 }
 
 impl NestedLoopJoinExec {
-    /// Try to create a nwe [`NestedLoopJoinExec`]
+    /// Try to create a nwe [`NestedLoopJoinExec`]    嵌套join 将其中一个表作为inner表 另一个作为outer表  应该是每行都去连接另一个表全部的数据
     pub fn try_new(
         left: Arc<dyn ExecutionPlan>,
         right: Arc<dyn ExecutionPlan>,
-        filter: Option<JoinFilter>,
-        join_type: &JoinType,
+        filter: Option<JoinFilter>,   // 用于过滤结果数据集
+        join_type: &JoinType,   // 表示连接类型
     ) -> Result<Self> {
         let left_schema = left.schema();
         let right_schema = right.schema();
+        // 检查连接字段有效性
         check_join_is_valid(&left_schema, &right_schema, &[])?;
+
+        // 合并2表的schema 同时根据连接类型将某些field变成nullable
         let (schema, column_indices) =
             build_join_schema(&left_schema, &right_schema, join_type);
+
+        // 生成嵌套join对象
         Ok(NestedLoopJoinExec {
             left,
             right,
@@ -133,6 +138,7 @@ impl ExecutionPlan for NestedLoopJoinExec {
         self.schema.clone()
     }
 
+    // 采用的分区算法
     fn output_partitioning(&self) -> Partitioning {
         // the partition of output is determined by the rule of `required_input_distribution`
         // TODO we can replace it by `partitioned_join_output_partitioning`
@@ -162,6 +168,7 @@ impl ExecutionPlan for NestedLoopJoinExec {
         None
     }
 
+    // 根据join类型返回分布式信息
     fn required_input_distribution(&self) -> Vec<Distribution> {
         distribution_from_join_type(&self.join_type)
     }
@@ -194,6 +201,7 @@ impl ExecutionPlan for NestedLoopJoinExec {
         )?))
     }
 
+    // join两表的数据 产生一个新的数据流
     fn execute(
         &self,
         partition: usize,
@@ -211,9 +219,13 @@ impl ExecutionPlan for NestedLoopJoinExec {
                 .register(context.memory_pool()),
         );
 
+        // 左右采用不同的加载方式 应该是因为 比如左连接 在连接过程中左表的数据都要全部保留 没法在join的同时filter数据
+
+        // 右连接
         let (outer_table, inner_table) = if left_is_build_side(self.join_type) {
             // left must be single partition
             let inner_table = self.inner_table.once(|| {
+                // 加载左表的数据  一次行加载全部到内存
                 load_specified_partition_of_input(
                     0,
                     self.left.clone(),
@@ -222,10 +234,12 @@ impl ExecutionPlan for NestedLoopJoinExec {
                     Arc::new(self.reservation.clone()),
                 )
             });
+            // 加载右表 但是一批批加载
             let outer_table = self.right.execute(partition, context)?;
             (outer_table, inner_table)
         } else {
             // right must be single partition
+            // 加载右表 左表保持流的形式
             let inner_table = self.inner_table.once(|| {
                 load_specified_partition_of_input(
                     0,
@@ -285,6 +299,7 @@ impl ExecutionPlan for NestedLoopJoinExec {
 
 // For the nested loop join, different join type need the different distribution for
 // left and right node.
+// 根据join类型 返回分布信息
 fn distribution_from_join_type(join_type: &JoinType) -> Vec<Distribution> {
     match join_type {
         JoinType::Inner | JoinType::Left | JoinType::LeftSemi | JoinType::LeftAnti => {
@@ -309,6 +324,7 @@ fn distribution_from_join_type(join_type: &JoinType) -> Vec<Distribution> {
 }
 
 /// Asynchronously collect the specified partition data of the input
+/// 加载某个plan某分区的数据  注意这里是一次性加载完了
 async fn load_specified_partition_of_input(
     partition: usize,
     input: Arc<dyn ExecutionPlan>,
@@ -316,15 +332,18 @@ async fn load_specified_partition_of_input(
     join_metrics: BuildProbeJoinMetrics,
     reservation: Arc<dyn TryGrow>,
 ) -> Result<JoinLeftData> {
+
+    // 通过plan获取数据流
     let stream = input.execute(partition, context)?;
 
-    // Load all batches and count the rows
+    // Load all batches and count the rows  只要最后的数据集 和总行数
     let (batches, num_rows, _, _) = stream
+        // 累加的逻辑
         .try_fold(
             (Vec::new(), 0usize, join_metrics, reservation),
             |mut acc, batch| async {
                 let batch_size = batch.get_array_memory_size();
-                // Reserve memory for incoming batch
+                // Reserve memory for incoming batch   记录内存开销
                 acc.3.try_grow(batch_size)?;
                 // Update metrics
                 acc.2.build_mem_used.add(batch_size);
@@ -339,12 +358,13 @@ async fn load_specified_partition_of_input(
         )
         .await?;
 
+    // 合成一个大的数据集
     let merged_batch = concat_batches(&input.schema(), &batches, num_rows)?;
 
     Ok(merged_batch)
 }
 
-// BuildLeft means the left relation is the single patrition side.
+// BuildLeft means the left relation is the single partition side.
 // For full join, both side are single partition, so it is BuildLeft and BuildRight, treat it as BuildLeft.
 pub fn left_is_build_side(join_type: JoinType) -> bool {
     matches!(
@@ -353,6 +373,7 @@ pub fn left_is_build_side(join_type: JoinType) -> bool {
     )
 }
 /// A stream that issues [RecordBatch]es as they arrive from the right  of the join.
+/// 读取join plan数据 就会产生一个该对象
 struct NestedLoopJoinStream {
     /// Input schema
     schema: Arc<Schema>,
@@ -360,15 +381,18 @@ struct NestedLoopJoinStream {
     filter: Option<JoinFilter>,
     /// type of the join
     join_type: JoinType,
+
+    /// 根据连接类型 左右表分别作为内外表
+
     /// the outer table data of the nested loop join
     outer_table: SendableRecordBatchStream,
-    /// the inner table data of the nested loop join
+    /// the inner table data of the nested loop join  内部表的所有数据都要加载到内存中
     inner_table: OnceFut<JoinLeftData>,
     /// There is nothing to process anymore and left side is processed in case of full join
     is_exhausted: bool,
     /// Keeps track of the left side rows whether they are visited
     visited_left_side: Option<BooleanBufferBuilder>,
-    /// Information of index and left / right placement of columns
+    /// Information of index and left / right placement of columns    描述左右表的列信息
     column_indices: Vec<ColumnIndex>,
     // TODO: support null aware equal
     // null_equals_null: bool
@@ -378,19 +402,24 @@ struct NestedLoopJoinStream {
     reservation: SharedMemoryReservation,
 }
 
+// 无论哪种连接方式  都可以用每行左表记录拼接右表的方式  连接类型只是决定了如何保留未拼接成功的记录
 fn build_join_indices(
-    left_index: usize,
-    batch: &RecordBatch,
-    left_data: &JoinLeftData,
+    left_index: usize,  // 本次处理的是左表的第几行记录
+    batch: &RecordBatch,     // 右表数据
+    left_data: &JoinLeftData,   // 左表数据
     filter: Option<&JoinFilter>,
 ) -> Result<(UInt64Array, UInt32Array)> {
     // left indices: [left_index, left_index, ...., left_index]
     // right indices: [0, 1, 2, 3, 4,....,right_row_count]
 
+    // 右表数据总行数
     let right_row_count = batch.num_rows();
+    // 代表左表与右表拼接后 每条连接记录使用的左表数据行号
     let left_indices = UInt64Array::from(vec![left_index as u64; right_row_count]);
+    // 使用的右表记录行号
     let right_indices = UInt32Array::from_iter_values(0..(right_row_count as u32));
     // in the nested loop join, the filter can contain non-equal and equal condition.
+    // 如果有过滤器要提前起作用 避免内存中数据集过大
     if let Some(filter) = filter {
         apply_join_filter_to_indices(
             left_data,
@@ -407,18 +436,22 @@ fn build_join_indices(
 
 impl NestedLoopJoinStream {
     /// For Right/RightSemi/RightAnti/Full joins, left is the single partition side.
+    /// 对应右连接  此时左表作为inner表  数据全部加载到内存中了
     fn poll_next_impl_for_build_left(
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
         // all left row
         let build_timer = self.join_metrics.build_time.timer();
+
+        // 加载左表的所有数据
         let left_data = match ready!(self.inner_table.get(cx)) {
             Ok(data) => data,
             Err(e) => return Poll::Ready(Some(Err(e))),
         };
         build_timer.done();
 
+        // TODO 忽略全连接 mysql不支持
         if self.visited_left_side.is_none() && self.join_type == JoinType::Full {
             // TODO: Replace `ceil` wrapper with stable `div_cell` after
             // https://github.com/rust-lang/rust/issues/88581
@@ -430,7 +463,7 @@ impl NestedLoopJoinStream {
         // add a bitmap for full join.
         let visited_left_side = self.visited_left_side.get_or_insert_with(|| {
             let left_num_rows = left_data.num_rows();
-            // only full join need bitmap
+            // only full join need bitmap  TODO
             if self.join_type == JoinType::Full {
                 let mut buffer = BooleanBufferBuilder::new(left_num_rows);
                 buffer.append_n(left_num_rows, false);
@@ -440,6 +473,7 @@ impl NestedLoopJoinStream {
             }
         });
 
+        // 拉取右表的数据
         self.outer_table
             .poll_next_unpin(cx)
             .map(|maybe_batch| match maybe_batch {
@@ -449,11 +483,12 @@ impl NestedLoopJoinStream {
                     self.join_metrics.input_rows.add(right_batch.num_rows());
                     let timer = self.join_metrics.join_time.timer();
 
+                    // 连接左右表的记录
                     let result = join_left_and_right_batch(
                         left_data,
                         &right_batch,
                         self.join_type,
-                        self.filter.as_ref(),
+                        self.filter.as_ref(),  // filter会立即生效
                         &self.column_indices,
                         &self.schema,
                         visited_left_side,
@@ -470,6 +505,7 @@ impl NestedLoopJoinStream {
                 }
                 Some(err) => Some(err),
                 None => {
+                    // TODO
                     if self.join_type == JoinType::Full && !self.is_exhausted {
                         // Only setting up timer, input is exhausted
                         let timer = self.join_metrics.join_time.timer();
@@ -510,6 +546,7 @@ impl NestedLoopJoinStream {
     }
 
     /// For Inner/Left/LeftSemi/LeftAnti joins, right is the single partition side.
+    /// 对应左连接/内连接   此时右表的数据已经全部加载到内存中了  在连接过程中可以通过filter过滤数据
     fn poll_next_impl_for_build_right(
         &mut self,
         cx: &mut std::task::Context<'_>,
@@ -524,6 +561,8 @@ impl NestedLoopJoinStream {
 
         // for build right, bitmap is not needed.
         let mut empty_visited_left_side = BooleanBufferBuilder::new(0);
+
+        // 一批批的拉取外(左)表的数据  并与右表进行join
         self.outer_table
             .poll_next_unpin(cx)
             .map(|maybe_batch| match maybe_batch {
@@ -533,7 +572,7 @@ impl NestedLoopJoinStream {
                     self.join_metrics.input_rows.add(left_batch.num_rows());
                     let timer = self.join_metrics.join_time.timer();
 
-                    // Actual join execution
+                    // Actual join execution   核心参数 左表数据/右表数据 连接类型
                     let result = join_left_and_right_batch(
                         &left_batch,
                         right_data,
@@ -551,6 +590,7 @@ impl NestedLoopJoinStream {
                         self.join_metrics.output_rows.add(batch.num_rows());
                     }
 
+                    // 每次触发next 返回一个结果集
                     Some(result)
                 }
                 Some(err) => Some(err),
@@ -559,23 +599,34 @@ impl NestedLoopJoinStream {
     }
 }
 
+// 连表逻辑
 fn join_left_and_right_batch(
-    left_batch: &RecordBatch,
+    left_batch: &RecordBatch,   // 左右表数据
     right_batch: &RecordBatch,
-    join_type: JoinType,
-    filter: Option<&JoinFilter>,
+    join_type: JoinType,   // 连接方式
+    filter: Option<&JoinFilter>,   // 用于过滤数据
     column_indices: &[ColumnIndex],
     schema: &Schema,
     visited_left_side: &mut BooleanBufferBuilder,
 ) -> Result<RecordBatch> {
+
+    // 实际上无论左连接还是右连接 对于已经提取出来的数据集操作都是一样的 都可以通过每一行左数据去连接右数据的方式
+
+    // 返回代表连接结果 分别在左表和右表需要保留的行号
     let indices_result = (0..left_batch.num_rows())
+        // 按照左表记录来连接
         .map(|left_row_index| {
             build_join_indices(left_row_index, right_batch, left_batch, filter)
         })
+        // 每组产生2个array
+        // left indices: [left_index, left_index, ...., left_index]
+        // right indices: [0, 1, 2, 3, 4,....,right_row_count]
         .collect::<Result<Vec<(UInt64Array, UInt32Array)>>>();
 
     let mut left_indices_builder = UInt64Builder::new();
     let mut right_indices_builder = UInt32Builder::new();
+
+    // vec转大数组
     let left_right_indices = match indices_result {
         Err(err) => Err(DataFusionError::Execution(format!(
             "Fail to build join indices in NestedLoopJoinExec, error:{err}"
@@ -593,16 +644,18 @@ fn join_left_and_right_batch(
             ))
         }
     };
+
     match left_right_indices {
         Ok((left_side, right_side)) => {
             // set the left bitmap
             // and only full join need the left bitmap
+            // TODO
             if join_type == JoinType::Full {
                 left_side.iter().flatten().for_each(|x| {
                     visited_left_side.set_bit(x as usize, true);
                 });
             }
-            // adjust the two side indices base on the join type
+            // adjust the two side indices base on the join type  根据连接方式 进行调整
             let (left_side, right_side) = adjust_indices_by_join_type(
                 left_side,
                 right_side,
@@ -611,12 +664,13 @@ fn join_left_and_right_batch(
                 join_type,
             );
 
+            // 根据索引信息构建数据集
             build_batch_from_indices(
-                schema,
+                schema,  // 连表后的schema
                 left_batch,
                 right_batch,
-                left_side,
-                right_side,
+                left_side,  // 存储左表的索引信息
+                right_side,  // 存储右表的索引信息
                 column_indices,
                 JoinSide::Left,
             )
@@ -625,21 +679,29 @@ fn join_left_and_right_batch(
     }
 }
 
+// 根据连接类型 对array进行调整
 fn adjust_indices_by_join_type(
+    // 此时左右索引存储的已经是连表结束的状态了
     left_indices: UInt64Array,
     right_indices: UInt32Array,
-    count_left_batch: usize,
-    count_right_batch: usize,
+    count_left_batch: usize,  // 左数据集的总行数
+    count_right_batch: usize,   // 右数据集的总行数
     join_type: JoinType,
 ) -> (UInt64Array, UInt32Array) {
     match join_type {
         JoinType::Inner => (left_indices, right_indices),
+
+        // 左连接 左边未匹配的数据还是正常展示 所以left_unmatched_indices 要追加到左索引
+        // 而右侧为匹配的要展示空记录 所以对应none
         JoinType::Left => {
             // matched
             // unmatched left row will be produced in this batch
+            // 得到不匹配的下标
             let left_unmatched_indices =
                 get_anti_u64_indices(count_left_batch, &left_indices);
             // combine the matched and unmatched left result together
+            // left_unmatched_indices追加到left_indices上
+            // none追加到right_indices上
             append_left_indices(left_indices, right_indices, left_unmatched_indices)
         }
         JoinType::LeftSemi => {
@@ -656,6 +718,7 @@ fn adjust_indices_by_join_type(
             (left_indices, right_indices)
         }
         // right/right-semi/right-anti => right = outer_table, left = inner_table
+        // 右连接  和左连接一样的操作    Full先忽略
         JoinType::Right | JoinType::Full => {
             // matched
             // unmatched right row will be produced in this batch
@@ -683,21 +746,25 @@ fn adjust_indices_by_join_type(
 /// Appends the `left_unmatched_indices` to the `left_indices`,
 /// and fills Null to tail of `right_indices` to
 /// keep the length of `left_indices` and `right_indices` consistent.
+/// 将不匹配的索引值 追加到左索引上
 fn append_left_indices(
-    left_indices: UInt64Array,
-    right_indices: UInt32Array,
-    left_unmatched_indices: UInt64Array,
+    left_indices: UInt64Array,  // 对应左表数据集的索引号
+    right_indices: UInt32Array,  // 对应右表数据集的索引号
+    left_unmatched_indices: UInt64Array,  // 代表左表未命中的索引号
 ) -> (UInt64Array, UInt32Array) {
+    // 不需要做处理
     if left_unmatched_indices.is_empty() {
         (left_indices, right_indices)
     } else {
         let unmatched_size = left_unmatched_indices.len();
         // the new left indices: left_indices + null array
         // the new right indices: right_indices + right_unmatched_indices
+        // 追加到左索引上
         let new_left_indices = left_indices
             .iter()
             .chain(left_unmatched_indices.iter())
             .collect::<UInt64Array>();
+        // 右侧则追加等量的none
         let new_right_indices = right_indices
             .iter()
             .chain(std::iter::repeat(None).take(unmatched_size))
@@ -717,6 +784,7 @@ impl Stream for NestedLoopJoinStream {
         if left_is_build_side(self.join_type) {
             self.poll_next_impl_for_build_left(cx)
         } else {
+            // 左连接
             self.poll_next_impl_for_build_right(cx)
         }
     }

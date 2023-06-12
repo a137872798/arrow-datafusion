@@ -148,16 +148,17 @@ pub fn linear_search<const SIDE: bool>(
 /// `low` and ends at the index `high`. The boolean-valued function `compare_fn`
 /// specifies the stopping criterion.
 pub fn search_in_slice<F>(
-    item_columns: &[ArrayRef],
+    item_columns: &[ArrayRef],   // 一组列
     target: &[ScalarValue],
-    compare_fn: F,
-    mut low: usize,
-    high: usize,
+    compare_fn: F,  // 通过该函数进行比较
+    mut low: usize,   // 检索起点
+    high: usize,  // 总长度
 ) -> Result<usize>
 where
     F: Fn(&[ScalarValue], &[ScalarValue]) -> Result<bool>,
 {
     while low < high {
+        // 这组列值在low位置的值组合成了一个行
         let val = get_row_at_idx(item_columns, low)?;
         if !compare_fn(&val, target)? {
             break;
@@ -170,6 +171,7 @@ where
 /// This function finds the partition points according to `partition_columns`.
 /// If there are no sort columns, then the result will be a single element
 /// vector containing one partition range spanning all data.
+/// 基于排序列 对行记录进行分区
 pub fn evaluate_partition_ranges(
     num_rows: usize,
     partition_columns: &[SortColumn],
@@ -212,6 +214,7 @@ fn needs_quotes(s: &str) -> bool {
 
 // TODO: remove when can use https://github.com/sqlparser-rs/sqlparser-rs/issues/805
 pub(crate) fn parse_identifiers(s: &str) -> Result<Vec<Ident>> {
+    // 通过默认分隔符进行拆解
     let dialect = GenericDialect;
     let mut parser = Parser::new(&dialect).try_with_sql(s)?;
     let mut idents = vec![];
@@ -265,8 +268,8 @@ pub(crate) fn parse_identifiers(s: &str) -> Result<Vec<Ident>> {
 
 /// Construct a new Vec<ArrayRef> from the rows of the `arrays` at the `indices`.
 pub fn get_arrayref_at_indices(
-    arrays: &[ArrayRef],
-    indices: &PrimitiveArray<UInt32Type>,
+    arrays: &[ArrayRef],  // 对应多个列值
+    indices: &PrimitiveArray<UInt32Type>,  //
 ) -> Result<Vec<ArrayRef>> {
     arrays
         .iter()
@@ -281,6 +284,7 @@ pub fn get_arrayref_at_indices(
         .collect()
 }
 
+// 解析限定名得到表相关的信息
 pub(crate) fn parse_identifiers_normalized(s: &str) -> Vec<String> {
     parse_identifiers(s)
         .unwrap_or_default()
@@ -293,6 +297,7 @@ pub(crate) fn parse_identifiers_normalized(s: &str) -> Vec<String> {
 }
 
 /// This function "takes" the elements at `indices` from the slice `items`.
+/// 按照下标将 items的元素提取出来 并返回
 pub fn get_at_indices<T: Clone, I: Borrow<usize>>(
     items: &[T],
     indices: impl IntoIterator<Item = I>,

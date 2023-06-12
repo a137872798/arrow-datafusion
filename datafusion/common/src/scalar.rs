@@ -61,6 +61,7 @@ const NANOSECS_IN_ONE_MONTH: i128 = 2_592_000_000_000_000; // assuming 30 days.
 /// See [datatypes](https://arrow.apache.org/docs/python/api/datatypes.html) for
 /// details on datatypes and the [format](https://github.com/apache/arrow/blob/master/format/Schema.fbs#L354-L375)
 /// for the definitive reference.
+/// 一个标量值 或者简单的理解为一个数值
 #[derive(Clone)]
 pub enum ScalarValue {
     /// represents `DataType::Null` (castable to/from any other type)
@@ -1847,7 +1848,7 @@ impl ScalarValue {
         })
     }
 
-    /// Getter for the `DataType` of the value
+    /// Getter for the `DataType` of the value  返回标量的类型
     pub fn get_datatype(&self) -> DataType {
         match self {
             ScalarValue::Boolean(_) => DataType::Boolean,
@@ -2823,6 +2824,7 @@ impl ScalarValue {
     }
 
     /// Converts a value in `array` at `index` into a ScalarValue
+    /// 获取array[index]的值
     pub fn try_from_array(array: &dyn Array, index: usize) -> Result<Self> {
         // handle NULL value
         if !array.is_valid(index) {
@@ -3005,8 +3007,10 @@ impl ScalarValue {
     }
 
     /// Try to parse `value` into a ScalarValue of type `target_type`
+    /// 将一个值 + 值的类型包装成标量
     pub fn try_from_string(value: String, target_type: &DataType) -> Result<Self> {
         let value = ScalarValue::Utf8(Some(value));
+        // 默认代表转换是不安全的
         let cast_options = CastOptions { safe: false };
         let cast_arr = cast_with_options(&value.to_array(), target_type, &cast_options)?;
         ScalarValue::try_from_array(&cast_arr, 0)

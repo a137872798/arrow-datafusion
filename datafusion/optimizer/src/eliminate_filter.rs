@@ -28,6 +28,7 @@ use datafusion_expr::{
 use crate::{OptimizerConfig, OptimizerRule};
 
 /// Optimization rule that eliminate the scalar value (true/false) filter with an [LogicalPlan::EmptyRelation]
+/// 消除过滤器
 #[derive(Default)]
 pub struct EliminateFilter;
 
@@ -51,11 +52,12 @@ impl OptimizerRule for EliminateFilter {
                 ..
             }) => {
                 match *v {
-                    // input also can be filter, apply again
+                    // input also can be filter, apply again  代表该过滤器总会成功 消除这层过滤器
                     true => Ok(Some(
                         self.try_optimize(input, _config)?
                             .unwrap_or_else(|| input.as_ref().clone()),
                     )),
+                    // 数据总会被过滤 返回空数据集
                     false => Ok(Some(LogicalPlan::EmptyRelation(EmptyRelation {
                         produce_one_row: false,
                         schema: input.schema().clone(),

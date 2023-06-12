@@ -42,6 +42,7 @@ use datafusion_expr::WindowFrame;
 /// A window expr that takes the form of a built in window function
 #[derive(Debug)]
 pub struct BuiltInWindowExpr {
+    // 内置的窗口表达式
     expr: Arc<dyn BuiltInWindowFunctionExpr>,
     partition_by: Vec<Arc<dyn PhysicalExpr>>,
     order_by: Vec<PhysicalSortExpr>,
@@ -97,9 +98,12 @@ impl WindowExpr for BuiltInWindowExpr {
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
+        // 获取分区对象
         let evaluator = self.expr.create_evaluator()?;
         let num_rows = batch.num_rows();
         if self.expr.uses_window_frame() {
+
+            // 这一套跟基于聚合的窗口函数很像 也是基于排序键进行分区 然后每个range分开计算
             let sort_options: Vec<SortOptions> =
                 self.order_by.iter().map(|o| o.options).collect();
             let mut row_wise_results = vec![];
@@ -123,9 +127,11 @@ impl WindowExpr for BuiltInWindowExpr {
             ScalarValue::iter_to_array(row_wise_results.into_iter())
         } else if evaluator.include_rank() {
             let columns = self.sort_columns(batch)?;
+            // 对行记录进行分区
             let sort_partition_points = evaluate_partition_ranges(num_rows, &columns)?;
             evaluator.evaluate_with_rank(num_rows, &sort_partition_points)
         } else {
+            // 不分区直接计算
             let (values, _) = self.get_values_orderbys(batch)?;
             evaluator.evaluate(&values, num_rows)
         }
@@ -133,6 +139,7 @@ impl WindowExpr for BuiltInWindowExpr {
 
     /// Evaluate the window function against the batch. This function facilitates
     /// stateful, bounded-memory implementations.
+    /// 基于之前的状态计算
     fn evaluate_stateful(
         &self,
         partition_batches: &PartitionBatches,
@@ -143,6 +150,7 @@ impl WindowExpr for BuiltInWindowExpr {
         let sort_options = self.order_by.iter().map(|o| o.options).collect::<Vec<_>>();
         for (partition_row, partition_batch_state) in partition_batches.iter() {
             let window_state =
+                // 获取之前的state 或者新建
                 if let Some(window_state) = window_agg_state.get_mut(partition_row) {
                     window_state
                 } else {

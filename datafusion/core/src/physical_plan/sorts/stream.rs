@@ -37,9 +37,10 @@ use std::task::{ready, Context, Poll};
 pub trait PartitionedStream: std::fmt::Debug + Send {
     type Output;
 
-    /// Returns the number of partitions
+    /// Returns the number of partitions   代表数据流分为多少个分区 在这里一个stream对应一个分区
     fn partitions(&self) -> usize;
 
+    // 从流中获取数据
     fn poll_next(
         &mut self,
         cx: &mut Context<'_>,
@@ -60,6 +61,8 @@ impl std::fmt::Debug for FusedStreams {
 }
 
 impl FusedStreams {
+
+    // 拉取数据时需要指定 第几个stream
     fn poll_next(
         &mut self,
         cx: &mut Context<'_>,
@@ -76,9 +79,10 @@ impl FusedStreams {
 
 /// A [`PartitionedStream`] that wraps a set of [`SendableRecordBatchStream`]
 /// and computes [`RowCursor`] based on the provided [`PhysicalSortExpr`]
+/// 当使用多个排序列时 对应的是该对象
 #[derive(Debug)]
 pub struct RowCursorStream {
-    /// Converter to convert output of physical expressions
+    /// Converter to convert output of physical expressions   用于将排序列转换成行
     converter: RowConverter,
     /// The physical expressions to sort by
     column_expressions: Vec<Arc<dyn PhysicalExpr>>,
@@ -89,9 +93,11 @@ pub struct RowCursorStream {
 impl RowCursorStream {
     pub fn try_new(
         schema: &Schema,
-        expressions: &[PhysicalSortExpr],
+        expressions: &[PhysicalSortExpr],   // 使用多个排序列
         streams: Vec<SendableRecordBatchStream>,
     ) -> Result<Self> {
+
+        // 将排序列信息收集起来
         let sort_fields = expressions
             .iter()
             .map(|expr| {
@@ -101,6 +107,7 @@ impl RowCursorStream {
             .collect::<Result<Vec<_>>>()?;
 
         let streams = streams.into_iter().map(|s| s.fuse()).collect();
+        // 用于将排序列 拼成一行
         let converter = RowConverter::new(sort_fields)?;
         Ok(Self {
             converter,
@@ -109,13 +116,16 @@ impl RowCursorStream {
         })
     }
 
+    // 转换读取到的数据集
     fn convert_batch(&mut self, batch: &RecordBatch) -> Result<RowCursor> {
+        // 抽取出排序列
         let cols = self
             .column_expressions
             .iter()
             .map(|expr| Ok(expr.evaluate(batch)?.into_array(batch.num_rows())))
             .collect::<Result<Vec<_>>>()?;
 
+        // 转换成行
         let rows = self.converter.convert_columns(&cols)?;
         Ok(RowCursor::new(rows))
     }
@@ -133,6 +143,8 @@ impl PartitionedStream for RowCursorStream {
         cx: &mut Context<'_>,
         stream_idx: usize,
     ) -> Poll<Option<Self::Output>> {
+
+        // 同样从stream中读取到数据后 需要转换
         Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
             r.and_then(|batch| {
                 let cursor = self.convert_batch(&batch)?;
@@ -143,10 +155,11 @@ impl PartitionedStream for RowCursorStream {
 }
 
 /// Specialized stream for sorts on single primitive columns
+/// 只有一个排序列
 pub struct FieldCursorStream<T: FieldArray> {
-    /// The physical expressions to sort by
+    /// The physical expressions to sort by   排序键
     sort: PhysicalSortExpr,
-    /// Input streams
+    /// Input streams   对应一组流对象
     streams: FusedStreams,
     phantom: PhantomData<fn(T) -> T>,
 }
@@ -160,6 +173,7 @@ impl<T: FieldArray> std::fmt::Debug for FieldCursorStream<T> {
 }
 
 impl<T: FieldArray> FieldCursorStream<T> {
+    // 通过一组流 和一个排序列生成
     pub fn new(sort: PhysicalSortExpr, streams: Vec<SendableRecordBatchStream>) -> Self {
         let streams = streams.into_iter().map(|s| s.fuse()).collect();
         Self {
@@ -169,7 +183,9 @@ impl<T: FieldArray> FieldCursorStream<T> {
         }
     }
 
+    // 从该stream下读取到的数据 需要经过该方法转换   这里是提取出排序列
     fn convert_batch(&mut self, batch: &RecordBatch) -> Result<FieldCursor<T::Values>> {
+        // 抽出排序列
         let value = self.sort.expr.evaluate(batch)?;
         let array = value.into_array(batch.num_rows());
         let array = array.as_any().downcast_ref::<T>().expect("field values");
@@ -191,6 +207,7 @@ impl<T: FieldArray> PartitionedStream for FieldCursorStream<T> {
     ) -> Poll<Option<Self::Output>> {
         Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
             r.and_then(|batch| {
+                // 读取对应流的数据 并转换
                 let cursor = self.convert_batch(&batch)?;
                 Ok((cursor, batch))
             })

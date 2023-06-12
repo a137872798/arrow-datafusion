@@ -48,7 +48,7 @@ macro_rules! compute_op {
     }};
 }
 
-/// Negative expression
+/// Negative expression   否定表达式
 #[derive(Debug)]
 pub struct NegativeExpr {
     /// Input expression
@@ -79,6 +79,7 @@ impl PhysicalExpr for NegativeExpr {
         self
     }
 
+    /// 类型与原来的是一致的
     fn data_type(&self, input_schema: &Schema) -> Result<DataType> {
         self.arg.data_type(input_schema)
     }

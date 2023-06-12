@@ -25,6 +25,7 @@ use crate::{error::Result, physical_plan::ExecutionPlan};
 /// `PhysicalOptimizerRule` transforms one ['ExecutionPlan'] into another which
 /// computes the same results, but in a potentially more efficient
 /// way.
+/// 可以优化执行计划
 pub trait PhysicalOptimizerRule {
     /// Rewrite `plan` to an optimized form
     fn optimize(

@@ -31,6 +31,7 @@ use std::sync::Arc;
 /// MEDIAN aggregate expression. This uses a lot of memory because all values need to be
 /// stored in memory before a result can be computed. If an approximation is sufficient
 /// then APPROX_MEDIAN provides a much more efficient solution.
+/// 中位数
 #[derive(Debug)]
 pub struct Median {
     name: String,
@@ -111,7 +112,7 @@ impl PartialEq<dyn Any> for Median {
 /// The intermediate state is represented as a List of those scalars
 struct MedianAccumulator {
     data_type: DataType,
-    all_values: Vec<ScalarValue>,
+    all_values: Vec<ScalarValue>,  // 中位数的计算需要借助所有值
 }
 
 impl Accumulator for MedianAccumulator {
@@ -121,6 +122,7 @@ impl Accumulator for MedianAccumulator {
         Ok(vec![state])
     }
 
+    // 将这些值追加进去
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         assert_eq!(values.len(), 1);
         let array = &values[0];

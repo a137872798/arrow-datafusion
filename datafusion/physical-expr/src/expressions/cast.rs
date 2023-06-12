@@ -36,14 +36,15 @@ use datafusion_expr::ColumnarValue;
 pub const DEFAULT_DATAFUSION_CAST_OPTIONS: CastOptions = CastOptions { safe: false };
 
 /// CAST expression casts an expression to a specific data type and returns a runtime error on invalid cast
+/// 这是一个类型转化的表达式
 #[derive(Debug)]
 pub struct CastExpr {
-    /// The expression to cast
+    /// The expression to cast   一般都是嵌套模式 也就是在内部表达式计算出结果后 在这一层进行类型转换
     expr: Arc<dyn PhysicalExpr>,
-    /// The data type to cast to
+    /// The data type to cast to  目标类型
     cast_type: DataType,
     /// Cast options
-    cast_options: CastOptions,
+    cast_options: CastOptions,  // 目前只有safe一个字段
 }
 
 impl CastExpr {
@@ -91,19 +92,23 @@ impl PhysicalExpr for CastExpr {
         Ok(self.cast_type.clone())
     }
 
+    // 可以看到是委托给内部expr
     fn nullable(&self, input_schema: &Schema) -> Result<bool> {
         self.expr.nullable(input_schema)
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
+        // 也是委托 然后对结果进行转换  同时cast不可能作用到整个结果集上 必然需要先抽取出某一列 在此基础上再进行转换
         let value = self.expr.evaluate(batch)?;
         cast_column(&value, &self.cast_type, &self.cast_options)
     }
 
+    // 也就是执行计划是从外到内
     fn children(&self) -> Vec<Arc<dyn PhysicalExpr>> {
         vec![self.expr.clone()]
     }
 
+    // 替换内部的子表达式
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn PhysicalExpr>>,
@@ -117,11 +122,13 @@ impl PhysicalExpr for CastExpr {
         )))
     }
 
+    // 描述区间
     fn evaluate_bounds(&self, children: &[&Interval]) -> Result<Interval> {
-        // Cast current node's interval to the right type:
+        // Cast current node's interval to the right type:   直接对区间值进行类型转换即可
         children[0].cast_to(&self.cast_type, &self.cast_options)
     }
 
+    // 通过一个新的区间范围限定结果
     fn propagate_constraints(
         &self,
         interval: &Interval,
@@ -131,6 +138,7 @@ impl PhysicalExpr for CastExpr {
         // Get child's datatype:
         let cast_type = child_interval.get_datatype()?;
         Ok(vec![Some(
+            // 将interval修改成children的类型
             interval.cast_to(&cast_type, &self.cast_options)?,
         )])
     }
@@ -151,6 +159,7 @@ impl PartialEq<dyn Any> for CastExpr {
 }
 
 /// Internal cast function for casting ColumnarValue -> ColumnarValue for cast_type
+/// 对结果进行类型转换
 pub fn cast_column(
     value: &ColumnarValue,
     cast_type: &DataType,
@@ -173,16 +182,20 @@ pub fn cast_column(
 /// Return a PhysicalExpression representing `expr` casted to
 /// `cast_type`, if any casting is needed.
 ///
-/// Note that such casts may lose type information
+/// Note that such casts may lose type information    产生一个cast表达式 用于将expr的结果转换成目标类型
 pub fn cast_with_options(
     expr: Arc<dyn PhysicalExpr>,
     input_schema: &Schema,
     cast_type: DataType,
     cast_options: CastOptions,
 ) -> Result<Arc<dyn PhysicalExpr>> {
+
+    // 应该是评估表达式的输出类型
     let expr_type = expr.data_type(input_schema)?;
+    // 不需要转换
     if expr_type == cast_type {
         Ok(expr.clone())
+        // 支持转换的情况下
     } else if can_cast_types(&expr_type, &cast_type) {
         Ok(Arc::new(CastExpr::new(expr, cast_type, cast_options)))
     } else {

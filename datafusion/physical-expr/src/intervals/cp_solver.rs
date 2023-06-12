@@ -121,6 +121,8 @@ use super::IntervalBound;
 /// is used to compute ranges for expressions through interval arithmetic.
 #[derive(Clone)]
 pub struct ExprIntervalGraph {
+    // ExprIntervalGraphNode 内部是一个表达式 外加一层值的限制
+    // StableGraph/NodeIndex 是机器学习相关的
     graph: StableGraph<ExprIntervalGraphNode, usize>,
     root: NodeIndex,
 }
@@ -148,6 +150,7 @@ pub enum PropagationResult {
 
 /// This is a node in the DAEG; it encapsulates a reference to the actual
 /// [PhysicalExpr] as well as an interval containing expression bounds.
+/// 表达式+数值范围
 #[derive(Clone, Debug)]
 pub struct ExprIntervalGraphNode {
     expr: Arc<dyn PhysicalExpr>,

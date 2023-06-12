@@ -32,7 +32,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct ExecutionProps {
     pub query_execution_start_time: DateTime<Utc>,
-    /// Providers for scalar variables
+    /// Providers for scalar variables  提供一些标量变量
     pub var_providers: Option<HashMap<VarType, Arc<dyn VarProvider + Send + Sync>>>,
 }
 

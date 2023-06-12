@@ -22,7 +22,7 @@ use crate::Expr;
 use std::fmt;
 use std::ops;
 
-/// Operators applied to expressions
+/// Operators applied to expressions   对应操作符号
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum Operator {
     /// Expressions are equal
@@ -79,7 +79,7 @@ pub enum Operator {
 
 impl Operator {
     /// If the operator can be negated, return the negated operator
-    /// otherwise return None
+    /// otherwise return None   取反操作
     pub fn negate(&self) -> Option<Operator> {
         match self {
             Operator::Eq => Some(Operator::NotEq),

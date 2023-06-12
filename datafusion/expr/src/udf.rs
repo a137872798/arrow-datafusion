@@ -24,13 +24,14 @@ use std::fmt::Formatter;
 use std::sync::Arc;
 
 /// Logical representation of a UDF.
+/// UDF （User Define Function） 用户自定义函数
 #[derive(Clone)]
 pub struct ScalarUDF {
-    /// name
+    /// name  函数名
     pub name: String,
-    /// signature
+    /// signature   描述参数列表
     pub signature: Signature,
-    /// Return type
+    /// Return type  可以根据参数提前预估返回类型
     pub return_type: ReturnTypeFunction,
     /// actual implementation
     ///
@@ -40,6 +41,7 @@ pub struct ScalarUDF {
     /// will be passed. In that case the single element is a null array to indicate
     /// the batch's row count (so that the generative zero-argument function can know
     /// the result array size).
+    /// 函数逻辑
     pub fun: ScalarFunctionImplementation,
 }
 

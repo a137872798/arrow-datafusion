@@ -93,6 +93,7 @@ impl PartitionEvaluator for NumRowsEvaluator {
         Ok(ScalarValue::UInt64(Some(self.state.n_rows as u64)))
     }
 
+    // 每个行号作为一个值
     fn evaluate(&self, _values: &[ArrayRef], num_rows: usize) -> Result<ArrayRef> {
         Ok(Arc::new(UInt64Array::from_iter_values(
             1..(num_rows as u64) + 1,

@@ -53,6 +53,7 @@ impl AnalyzerRule for CountWildcardRule {
     }
 }
 
+// 分析执行计划
 fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
     let mut rewriter = CountWildcardRewriter {};
     match plan {
@@ -60,12 +61,14 @@ fn analyze_internal(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
             let window_expr = window
                 .window_expr
                 .iter()
+                // 将通配符换成1
                 .map(|expr| expr.clone().rewrite(&mut rewriter).unwrap())
                 .collect::<Vec<Expr>>();
 
             Ok(Transformed::Yes(LogicalPlan::Window(Window {
                 input: window.input.clone(),
                 window_expr,
+                // schema也要进行简化
                 schema: rewrite_schema(&window.schema),
             })))
         }
@@ -129,12 +132,14 @@ struct CountWildcardRewriter {}
 impl TreeNodeRewriter for CountWildcardRewriter {
     type N = Expr;
 
+    // 对expr进行改写 
     fn mutate(&mut self, old_expr: Expr) -> Result<Expr> {
         let new_expr = match old_expr.clone() {
             Expr::Column(Column { name, relation }) if name.contains(COUNT_STAR) => {
                 Expr::Column(Column {
                     name: name.replace(
                         COUNT_STAR,
+                        // 将count(*) 转换成count(1)
                         count(lit(COUNT_STAR_EXPANSION)).to_string().as_str(),
                     ),
                     relation: relation.clone(),
@@ -150,6 +155,7 @@ impl TreeNodeRewriter for CountWildcardRewriter {
                 order_by,
                 window_frame,
             }) if args.len() == 1 => match args[0] {
+                // 将通配符转换成1
                 Expr::Wildcard => {
                     Expr::WindowFunction(datafusion_expr::expr::WindowFunction {
                         fun: window_function::WindowFunction::AggregateFunction(
@@ -179,6 +185,7 @@ impl TreeNodeRewriter for CountWildcardRewriter {
                 _ => old_expr,
             },
 
+            // 有子查询的情况 递归处理
             ScalarSubquery(Subquery {
                 subquery,
                 outer_ref_columns,
@@ -241,6 +248,7 @@ fn rewrite_schema(schema: &DFSchema) -> DFSchemaRef {
         .iter()
         .map(|field| {
             let mut name = field.field().name().clone();
+            // 替换*
             if name.contains(COUNT_STAR) {
                 name = name.replace(
                     COUNT_STAR,

@@ -46,6 +46,7 @@ use object_store::{ObjectMeta, ObjectStore};
 /// providers that support the the same file formats.
 ///
 /// [`TableProvider`]: crate::datasource::datasource::TableProvider
+/// 解析文件 获取执行计划/schema
 #[async_trait]
 pub trait FileFormat: Send + Sync + fmt::Debug {
     /// Returns the table provider as [`Any`](std::any::Any) so that it can be

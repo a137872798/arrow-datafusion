@@ -33,6 +33,7 @@ use crate::physical_plan::stream::RecordBatchStreamAdapter;
 use crate::physical_plan::{ExecutionPlan, Partitioning, SendableRecordBatchStream};
 
 /// An [`ExecutionPlan`] for [`PartitionStream`]
+/// 对应StreamingTable
 pub struct StreamingTableExec {
     partitions: Vec<Arc<dyn PartitionStream>>,
     projection: Option<Arc<[usize]>>,

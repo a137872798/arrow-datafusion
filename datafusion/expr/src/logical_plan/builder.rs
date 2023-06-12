@@ -89,11 +89,13 @@ pub const UNNAMED_TABLE: &str = "?table?";
 /// # Ok(())
 /// # }
 /// ```
+/// 通过该对象构建逻辑计划
 #[derive(Debug, Clone)]
 pub struct LogicalPlanBuilder {
     plan: LogicalPlan,
 }
 
+/// 逻辑计划生成器
 impl LogicalPlanBuilder {
     /// Create a builder from an existing plan
     pub fn from(plan: LogicalPlan) -> Self {
@@ -101,6 +103,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Return the output schema of the plan build so far
+    /// 返回plan关联的schema
     pub fn schema(&self) -> &DFSchemaRef {
         self.plan.schema()
     }
@@ -108,6 +111,8 @@ impl LogicalPlanBuilder {
     /// Create an empty relation.
     ///
     /// `produce_one_row` set to true means this empty node needs to produce a placeholder row.
+    /// produce_one_row 是否生成一个占位行
+    /// empty 生成一个空的执行计划
     pub fn empty(produce_one_row: bool) -> Self {
         Self::from(LogicalPlan::EmptyRelation(EmptyRelation {
             produce_one_row,
@@ -124,24 +129,33 @@ impl LogicalPlanBuilder {
     /// so it's usually better to override the default names with a table alias list.
     ///
     /// If the values include params/binders such as $1, $2, $3, etc, then the `param_data_types` should be provided.
+    /// 该逻辑计划直接对应了一组value
     pub fn values(mut values: Vec<Vec<Expr>>) -> Result<Self> {
         if values.is_empty() {
             return Err(DataFusionError::Plan("Values list cannot be empty".into()));
         }
+
+        // 代表每行有多少列
         let n_cols = values[0].len();
+
         if n_cols == 0 {
             return Err(DataFusionError::Plan(
                 "Values list cannot be zero length".into(),
             ));
         }
         let empty_schema = DFSchema::empty();
+
+        // 对应每一列数据的类型
         let mut field_types: Vec<Option<DataType>> = Vec::with_capacity(n_cols);
         for _ in 0..n_cols {
             field_types.push(None);
         }
         // hold all the null holes so that we can correct their data types later
+        // <row号，col号> 记录列值为null的变量坐标
         let mut nulls: Vec<(usize, usize)> = Vec::new();
+        // 行号和行数据
         for (i, row) in values.iter().enumerate() {
+            // 每行的列数都要一致
             if row.len() != n_cols {
                 return Err(DataFusionError::Plan(format!(
                     "Inconsistent data length across values list: got {} values in row {} but expected {}",
@@ -150,15 +164,21 @@ impl LogicalPlanBuilder {
                     n_cols
                 )));
             }
+
             field_types = row
                 .iter()
                 .enumerate()
+                // col号和expr
                 .map(|(j, expr)| {
+                    // 传入的是个null值
                     if let Expr::Literal(ScalarValue::Null) = expr {
                         nulls.push((i, j));
+                        // 之前还没被赋值的情况 Null自然对应None 而如果后面出现了值 并修改了类型后，会更新field_type
                         Ok(field_types[j].clone())
                     } else {
+                        // 获取value的类型
                         let data_type = expr.get_type(&empty_schema)?;
+                        // 代表同一列的数据前后不一致
                         if let Some(prev_data_type) = &field_types[j] {
                             if prev_data_type != &data_type {
                                 let err = format!("Inconsistent data type across values list at row {i} column {j}");
@@ -170,12 +190,17 @@ impl LogicalPlanBuilder {
                 })
                 .collect::<Result<Vec<Option<DataType>>>>()?;
         }
+
+        // 此时已经得到所有field的类型了
+        // 这里生成了一组虚拟列名  column[]
         let fields = field_types
             .iter()
             .enumerate()
             .map(|(j, data_type)| {
                 // naming is following convention https://www.postgresql.org/docs/current/queries-values.html
                 let name = &format!("column{}", j + 1);
+
+                // 这时使用的列名是类似占位符的东西 column1,column2,...
                 DFField::new_unqualified(
                     name,
                     data_type.clone().unwrap_or(DataType::Utf8),
@@ -183,9 +208,13 @@ impl LogicalPlanBuilder {
                 )
             })
             .collect::<Vec<_>>();
+
+        // 把之前的null值变成类型相关的None
         for (i, j) in nulls {
             values[i][j] = Expr::Literal(ScalarValue::try_from(fields[j].data_type())?);
         }
+
+        // 将基于虚拟列名生成的schema与 values合成 Values
         let schema =
             DFSchemaRef::new(DFSchema::new_with_metadata(fields, HashMap::new())?);
         Ok(Self::from(LogicalPlan::Values(Values { schema, values })))
@@ -223,21 +252,25 @@ impl LogicalPlanBuilder {
     /// let table_reference = TableReference::bare("MyTable");
     /// let scan = LogicalPlanBuilder::scan(table_reference, table, None);
     /// ```
+    /// 代表生成一个对目标表的查询计划
     pub fn scan(
-        table_name: impl Into<OwnedTableReference>,
+        table_name: impl Into<OwnedTableReference>,  // 查询的目标表
         table_source: Arc<dyn TableSource>,
-        projection: Option<Vec<usize>>,
+        projection: Option<Vec<usize>>,  // 描述查询结果需要保留哪些列
     ) -> Result<Self> {
         Self::scan_with_filters(table_name, table_source, projection, vec![])
     }
 
     /// Create a [DmlStatement] for inserting the contents of this builder into the named table
+    /// 产生一个DML操作
     pub fn insert_into(
-        input: LogicalPlan,
+        input: LogicalPlan,  // plan包含了多个expr 执行plan就代表完成insert操作 只要指定目标表就行了
         table_name: impl Into<OwnedTableReference>,
         table_schema: &Schema,
     ) -> Result<Self> {
         let table_schema = table_schema.clone().to_dfschema_ref()?;
+
+        // 简单的组装而已
         Ok(Self::from(LogicalPlan::Dml(DmlStatement {
             table_name: table_name.into(),
             table_schema,
@@ -250,8 +283,8 @@ impl LogicalPlanBuilder {
     pub fn scan_with_filters(
         table_name: impl Into<OwnedTableReference>,
         table_source: Arc<dyn TableSource>,
-        projection: Option<Vec<usize>>,
-        filters: Vec<Expr>,
+        projection: Option<Vec<usize>>,  // 对应 Select xxx的部分
+        filters: Vec<Expr>, // 对应 Where 的部分
     ) -> Result<Self> {
         let table_name = table_name.into();
 
@@ -261,11 +294,14 @@ impl LogicalPlanBuilder {
             ));
         }
 
+        // 获取表的元数据信息
         let schema = table_source.schema();
 
+        // 针对需要保留的列 转换成schema
         let projected_schema = projection
             .as_ref()
             .map(|p| {
+                // 加工schema 只需要保留这些列
                 DFSchema::new_with_metadata(
                     p.iter()
                         .map(|i| {
@@ -285,28 +321,31 @@ impl LogicalPlanBuilder {
         let table_scan = LogicalPlan::TableScan(TableScan {
             table_name,
             source: table_source,
-            projected_schema: Arc::new(projected_schema),
-            projection,
-            filters,
-            fetch: None,
+            projected_schema: Arc::new(projected_schema),  // 本次需要的列的元数据
+            projection,  // 需要保留的列的下标
+            filters,  // 过滤数据集的过滤器
+            fetch: None,  // limit
         });
         Ok(Self::from(table_scan))
     }
 
-    /// Wrap a plan in a window
+    /// Wrap a plan in a window  在原plan上追加一层窗口函数
     pub fn window_plan(
         input: LogicalPlan,
-        window_exprs: Vec<Expr>,
+        window_exprs: Vec<Expr>,  // 作用上去的窗口表达式
     ) -> Result<LogicalPlan> {
         let mut plan = input;
+        // 不同的窗口函数 分区键和排序键都可能会不同 把这些函数按照相同的分区键/排序键进行分组
         let mut groups = group_window_expr_by_sort_keys(&window_exprs)?;
         // To align with the behavior of PostgreSQL, we want the sort_keys sorted as same rule as PostgreSQL that first
         // we compare the sort key themselves and if one window's sort keys are a prefix of another
         // put the window with more sort keys first. so more deeply sorted plans gets nested further down as children.
         // The sort_by() implementation here is a stable sort.
         // Note that by this rule if there's an empty over, it'll be at the top level
+        // 已经分完组后 还需要对分组结果进行排序  这样作用到结果上的窗口函数就有了先后顺序
         groups.sort_by(|(key_a, _), (key_b, _)| {
             for ((first, _), (second, _)) in key_a.iter().zip(key_b.iter()) {
+                // 简单理解为比较col的下标
                 let key_ordering = compare_sort_expr(first, second, plan.schema());
                 match key_ordering {
                     Ordering::Less => {
@@ -320,10 +359,13 @@ impl LogicalPlanBuilder {
             }
             key_b.len().cmp(&key_a.len())
         });
+
+        // 将使用相同分区键的窗口函数 包装成一个window逻辑计划 并包装在input上
         for (_, exprs) in groups {
             let window_exprs = exprs.into_iter().cloned().collect::<Vec<_>>();
             // Partition and sorting is done at physical level, see the EnforceDistribution
             // and EnforceSorting rules.
+            // 按照不同的分区键分组的窗口函数 分别包装到内部plan上
             plan = LogicalPlanBuilder::from(plan)
                 .window(window_exprs)?
                 .build()?;
@@ -331,6 +373,7 @@ impl LogicalPlanBuilder {
         Ok(plan)
     }
     /// Apply a projection without alias.
+    /// 在原有计划上追加一层投影
     pub fn project(
         self,
         expr: impl IntoIterator<Item = impl Into<Expr>>,
@@ -339,6 +382,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Select the given column indices
+    /// 与上面不同的是 传入的是列的下标
     pub fn select(self, indices: impl IntoIterator<Item = usize>) -> Result<Self> {
         let fields = self.plan.schema().fields();
         let exprs: Vec<_> = indices
@@ -349,7 +393,9 @@ impl LogicalPlanBuilder {
     }
 
     /// Apply a filter
+    /// 生成过滤表达式
     pub fn filter(self, expr: impl Into<Expr>) -> Result<Self> {
+        // 就是补全过滤表达式中列的表信息  因为表信息来自于plan
         let expr = normalize_col(expr.into(), &self.plan)?;
         Ok(Self::from(LogicalPlan::Filter(Filter::try_new(
             expr,
@@ -358,6 +404,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Make a builder for a prepare logical plan from the builder's plan
+    /// 提前处理sql 之后只需要参数就可以执行sql 相比每次都要传入不同的sql 减少了重复优化的开销
     pub fn prepare(self, name: String, data_types: Vec<DataType>) -> Result<Self> {
         Ok(Self::from(LogicalPlan::Prepare(Prepare {
             name,
@@ -372,6 +419,7 @@ impl LogicalPlanBuilder {
     ///
     /// `fetch` - Maximum number of rows to fetch, after skipping `skip` rows,
     ///          if specified.
+    /// 追加一层limit
     pub fn limit(self, skip: usize, fetch: Option<usize>) -> Result<Self> {
         Ok(Self::from(LogicalPlan::Limit(Limit {
             skip,
@@ -413,17 +461,23 @@ impl LogicalPlanBuilder {
     ///  (which will appear as a (1, 2), (1, 2) if a and b are projected
     ///
     /// See <https://github.com/apache/arrow-datafusion/issues/5065> for more details
+    /// 当排序需要的某些列 没有出现在plan的schema中时  需要补上这些列
     fn add_missing_columns(
         curr_plan: LogicalPlan,
         missing_cols: &[Column],
-        is_distinct: bool,
+        is_distinct: bool,  // 代表外层有一个Distinct计划
     ) -> Result<LogicalPlan> {
         match curr_plan {
+
+            // 输入的计划上已经包含了一层投影
             LogicalPlan::Projection(Projection {
                 input,
                 mut expr,
                 schema: _,
+                // 这些缺失的列能够在投影前被找到  那么就要将本次的投影后置
             }) if missing_cols.iter().all(|c| input.schema().has_column(c)) => {
+
+                // 从input.schema上找到field关联的table
                 let mut missing_exprs = missing_cols
                     .iter()
                     .map(|c| normalize_col(Expr::Column(c.clone()), &input))
@@ -433,13 +487,20 @@ impl LogicalPlanBuilder {
                 // missing_cols may be already present but without the new
                 // projected alias.
                 missing_exprs.retain(|e| !expr.contains(e));
+
+                // 首次调用是false  在往内递归的过程中可能会遇到Distinct类型的计划
                 if is_distinct {
                     Self::ambiguous_distinct_check(&missing_exprs, missing_cols, &expr)?;
                 }
+                // 在内层投影上额外保留这些字段  这样外层的sort就可以找到这些列了
                 expr.extend(missing_exprs);
+                // 更新投影信息
                 Ok(project((*input).clone(), expr)?)
             }
+
+            // 其他情况
             _ => {
+                // 这里的前提相当于是认定sort需要的列 一定在前面出现过了 要往前回溯找到对应的投影表达式 并改写投影计划  确保排序列可以保留到后面
                 let is_distinct =
                     is_distinct || matches!(curr_plan, LogicalPlan::Distinct(_));
                 let new_inputs = curr_plan
@@ -454,16 +515,18 @@ impl LogicalPlanBuilder {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
+                // 替换内部的plan
                 let expr = curr_plan.expressions();
                 from_plan(&curr_plan, &expr, &new_inputs)
             }
         }
     }
 
+    // TODO distinct检查
     fn ambiguous_distinct_check(
-        missing_exprs: &[Expr],
-        missing_cols: &[Column],
-        projection_exprs: &[Expr],
+        missing_exprs: &[Expr],  // 缺失的列对应的expr
+        missing_cols: &[Column],  // 缺失的列
+        projection_exprs: &[Expr],  // 本次投影后保留的expr
     ) -> Result<()> {
         if missing_exprs.is_empty() {
             return Ok(());
@@ -500,23 +563,29 @@ impl LogicalPlanBuilder {
     }
 
     /// Apply a sort
+    /// 将一组(因为结果可以按照多个列 不同的排序方式进行排序)排序表达式作用在查询结果上
     pub fn sort(
         self,
         exprs: impl IntoIterator<Item = impl Into<Expr>> + Clone,
     ) -> Result<Self> {
+        // TODO 看过去就是做了cast或者修改col的所属表信息  不影响排序逻辑
         let exprs = rewrite_sort_cols_by_aggs(exprs, &self.plan)?;
 
         let schema = self.plan.schema();
 
         // Collect sort columns that are missing in the input plan's schema
+        // 排序用到的col可能不包含在schema中
         let mut missing_cols: Vec<Column> = vec![];
         exprs
             .clone()
             .into_iter()
             .try_for_each::<_, Result<()>>(|expr| {
+                // 简单理解expr是col
                 let columns = expr.to_columns()?;
 
+                // 这里是排序用到的所有列
                 columns.into_iter().for_each(|c| {
+                    // 排序涉及到的这些列 并没有在声明的schema中 意味着无法获取这些col的信息
                     if schema.field_from_column(&c).is_err() {
                         missing_cols.push(c);
                     }
@@ -525,6 +594,7 @@ impl LogicalPlanBuilder {
                 Ok(())
             })?;
 
+        // 所有排序键能够在schema中找到  不需要其他处理
         if missing_cols.is_empty() {
             return Ok(Self::from(LogicalPlan::Sort(Sort {
                 expr: normalize_cols(exprs, &self.plan)?,
@@ -534,6 +604,8 @@ impl LogicalPlanBuilder {
         }
 
         // remove pushed down sort columns
+        // 为了是排序有效  可能会在plan.schema上添加很多一开始没用的col
+        // 然后为了保证查询结果与预期的一致 要额外用一层投影处理
         let new_expr = schema
             .fields()
             .iter()
@@ -541,6 +613,7 @@ impl LogicalPlanBuilder {
             .collect();
 
         let is_distinct = false;
+        // 现在需要将缺失的列补充到内部plan上
         let plan = Self::add_missing_columns(self.plan, &missing_cols, is_distinct)?;
         let sort_plan = LogicalPlan::Sort(Sort {
             expr: normalize_cols(exprs, &plan)?,
@@ -548,6 +621,7 @@ impl LogicalPlanBuilder {
             fetch: None,
         });
 
+        // 隐藏掉添加的col
         Ok(Self::from(LogicalPlan::Projection(Projection::try_new(
             new_expr,
             Arc::new(sort_plan),
@@ -560,8 +634,10 @@ impl LogicalPlanBuilder {
     }
 
     /// Apply a union, removing duplicate rows
+    /// union的同时去掉重复的列
     pub fn union_distinct(self, plan: LogicalPlan) -> Result<Self> {
         // unwrap top-level Distincts, to avoid duplication
+        // 即使在union前已经去重了   但是union后实际上可能又会出现一样的数据  所以修改成union后distinct
         let left_plan: LogicalPlan = match self.plan {
             LogicalPlan::Distinct(Distinct { input }) => (*input).clone(),
             _ => self.plan,
@@ -571,6 +647,7 @@ impl LogicalPlanBuilder {
             _ => plan,
         };
 
+        // union后去重
         Ok(Self::from(LogicalPlan::Distinct(Distinct {
             input: Arc::new(union(left_plan, right_plan)?),
         })))
@@ -598,6 +675,7 @@ impl LogicalPlanBuilder {
         self.join_detailed(right, join_type, join_keys, filter, false)
     }
 
+    // 对column表达式进行标准化处理  返回权限定名
     pub(crate) fn normalize(
         plan: &LogicalPlan,
         column: impl Into<Column> + Clone,
@@ -615,18 +693,20 @@ impl LogicalPlanBuilder {
     /// If null_equals_null is true then null == null, else null != null
     pub fn join_detailed(
         self,
-        right: LogicalPlan,
-        join_type: JoinType,
-        join_keys: (Vec<impl Into<Column>>, Vec<impl Into<Column>>),
-        filter: Option<Expr>,
-        null_equals_null: bool,
+        right: LogicalPlan,   // 需要与该计划合并
+        join_type: JoinType,  // 表示join的方式
+        join_keys: (Vec<impl Into<Column>>, Vec<impl Into<Column>>),  // 连表用的字段
+        filter: Option<Expr>,  // 对join结果进行过滤  (where的部分)
+        null_equals_null: bool,  // null是否等于null
     ) -> Result<Self> {
+        // 连表的列数量肯定是匹配的
         if join_keys.0.len() != join_keys.1.len() {
             return Err(DataFusionError::Plan(
                 "left_keys and right_keys were not the same length".to_string(),
             ));
         }
 
+        // 确保where使用的列出现在2个plan的schema中
         let filter = if let Some(expr) = filter {
             let filter = normalize_col_with_schemas_and_ambiguity_check(
                 expr,
@@ -643,30 +723,41 @@ impl LogicalPlanBuilder {
                 .0
                 .into_iter()
                 .zip(join_keys.1.into_iter())
+                // 遍历连表用到的列值对
                 .map(|(l, r)| {
                     let l = l.into();
                     let r = r.into();
 
                     match (&l.relation, &r.relation) {
+                        // 2个列都标记了所属的表
                         (Some(lr), Some(rr)) => {
+
+                            // 表达式左侧对应的是join的左表
                             let l_is_left =
                                 self.plan.schema().field_with_qualified_name(lr, &l.name);
+                            // 左侧对应join右表
                             let l_is_right =
                                 right.schema().field_with_qualified_name(lr, &l.name);
+                            // 右侧对应join左表
                             let r_is_left =
                                 self.plan.schema().field_with_qualified_name(rr, &r.name);
+                            // 右侧对应join右表
                             let r_is_right =
                                 right.schema().field_with_qualified_name(rr, &r.name);
 
                             match (l_is_left, l_is_right, r_is_left, r_is_right) {
+                                // 左右，右左是正常情况
                                 (_, Ok(_), Ok(_), _) => (Ok(r), Ok(l)),
                                 (Ok(_), _, _, Ok(_)) => (Ok(l), Ok(r)),
                                 _ => (
+                                    // 这里是开启检查  不知道啥意义
                                     Self::normalize(&self.plan, l),
                                     Self::normalize(&right, r),
                                 ),
                             }
                         }
+
+                        // 左边的列声明了表  右边没有
                         (Some(lr), None) => {
                             let l_is_left =
                                 self.plan.schema().field_with_qualified_name(lr, &l.name);
@@ -714,6 +805,7 @@ impl LogicalPlanBuilder {
                 })
                 .unzip();
 
+        // 在上面经过了顺序的调整  left_keys对应的字段是从左plan中获取的 right_keys对应右plan
         let left_keys = left_keys.into_iter().collect::<Result<Vec<Column>>>()?;
         let right_keys = right_keys.into_iter().collect::<Result<Vec<Column>>>()?;
 
@@ -738,6 +830,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Apply a join with using constraint, which duplicates all join columns in output schema.
+    /// TODO
     pub fn join_using(
         self,
         right: LogicalPlan,
@@ -803,6 +896,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Apply a cross join
+    /// TODO 笛卡尔积应该就是没有连表条件吧
     pub fn cross_join(self, right: LogicalPlan) -> Result<Self> {
         let schema = self.plan.schema().join(right.schema())?;
         Ok(Self::from(LogicalPlan::CrossJoin(CrossJoin {
@@ -813,6 +907,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Repartition
+    /// 给plan包装一层分区
     pub fn repartition(self, partitioning_scheme: Partitioning) -> Result<Self> {
         Ok(Self::from(LogicalPlan::Repartition(Repartition {
             input: Arc::new(self.plan),
@@ -821,20 +916,29 @@ impl LogicalPlanBuilder {
     }
 
     /// Apply a window functions to extend the schema
+    /// 追加窗口函数
     pub fn window(
         self,
-        window_expr: impl IntoIterator<Item = impl Into<Expr>>,
+        window_expr: impl IntoIterator<Item = impl Into<Expr>>,  // 这组窗口函数具有一样的分区键
     ) -> Result<Self> {
+        // 简单理解就是将col变成全限定名
         let window_expr = normalize_cols(window_expr, &self.plan)?;
         let all_expr = window_expr.iter();
+
+        // 确保这组表达式没有同名的
         validate_unique_names("Windows", all_expr.clone())?;
+        // 获取window函数能够作用的field范围
         let mut window_fields: Vec<DFField> = self.plan.schema().fields().clone();
+
+        // 除了plan的field外 还会追加窗口表达式用到的字段
+        // exprlist_to_fields 当发现plan内部已经存在聚合函数同名field时 就会避免重复添加
         window_fields.extend_from_slice(&exprlist_to_fields(all_expr, &self.plan)?);
         let metadata = self.plan.schema().metadata().clone();
 
         Ok(Self::from(LogicalPlan::Window(Window {
             input: Arc::new(self.plan),
             window_expr,
+            // 相当于把表示窗口函数结果的字段追加到schema中   (聚合/window结果会对应一个虚拟field 以displayname作为field名)
             schema: Arc::new(DFSchema::new_with_metadata(window_fields, metadata)?),
         })))
     }
@@ -842,6 +946,7 @@ impl LogicalPlanBuilder {
     /// Apply an aggregate: grouping on the `group_expr` expressions
     /// and calculating `aggr_expr` aggregates for each distinct
     /// value of the `group_expr`;
+    /// 简单的组合
     pub fn aggregate(
         self,
         group_expr: impl IntoIterator<Item = impl Into<Expr>>,
@@ -863,6 +968,7 @@ impl LogicalPlanBuilder {
     ///
     /// if `verbose` is true, prints out additional details.
     pub fn explain(self, verbose: bool, analyze: bool) -> Result<Self> {
+        // explain的schema是固定的  (plan_type,plan)
         let schema = LogicalPlan::explain_schema();
         let schema = schema.to_dfschema_ref()?;
 
@@ -886,7 +992,7 @@ impl LogicalPlanBuilder {
         }
     }
 
-    /// Process intersect set operator
+    /// Process intersect set operator  TODO
     pub fn intersect(
         left_plan: LogicalPlan,
         right_plan: LogicalPlan,
@@ -900,7 +1006,7 @@ impl LogicalPlanBuilder {
         )
     }
 
-    /// Process except set operator
+    /// Process except set operator  TODO
     pub fn except(
         left_plan: LogicalPlan,
         right_plan: LogicalPlan,
@@ -915,6 +1021,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Process intersect or except
+    /// TODO 先忽略 LeftSemi/LeftAnti
     fn intersect_or_except(
         left_plan: LogicalPlan,
         right_plan: LogicalPlan,
@@ -965,10 +1072,12 @@ impl LogicalPlanBuilder {
     ///
     /// filter: any other filter expression to apply during the join. equi_exprs predicates are likely
     /// to be evaluated more quickly than the filter expressions
+    /// 与另一个plan进行join
     pub fn join_with_expr_keys(
         self,
         right: LogicalPlan,
         join_type: JoinType,
+        // 用于join的字段
         equi_exprs: (Vec<impl Into<Expr>>, Vec<impl Into<Expr>>),
         filter: Option<Expr>,
     ) -> Result<Self> {
@@ -986,6 +1095,7 @@ impl LogicalPlanBuilder {
                 let left_key = l.into();
                 let right_key = r.into();
 
+                // 确保连接用的field 出现在左plan或者右plan的字段中
                 let left_using_columns = left_key.to_columns()?;
                 let normalized_left_key = normalize_col_with_schemas_and_ambiguity_check(
                     left_key,
@@ -993,6 +1103,7 @@ impl LogicalPlanBuilder {
                     &[left_using_columns],
                 )?;
 
+                // 同样要检测右表
                 let right_using_columns = right_key.to_columns()?;
                 let normalized_right_key = normalize_col_with_schemas_and_ambiguity_check(
                     right_key,
@@ -1000,7 +1111,7 @@ impl LogicalPlanBuilder {
                     &[right_using_columns],
                 )?;
 
-                // find valid equijoin
+                // find valid equijoin   校验
                 find_valid_equijoin_key_pair(
                         &normalized_left_key,
                         &normalized_right_key,
@@ -1013,6 +1124,7 @@ impl LogicalPlanBuilder {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        //
         let join_schema =
             build_join_schema(self.plan.schema(), right.schema(), &join_type)?;
 
@@ -1028,7 +1140,7 @@ impl LogicalPlanBuilder {
         })))
     }
 
-    /// Unnest the given column.
+    /// Unnest the given column.   针对该列 解除嵌套
     pub fn unnest_column(self, column: impl Into<Column>) -> Result<Self> {
         Ok(Self::from(unnest(self.plan, column.into())?))
     }
@@ -1036,6 +1148,7 @@ impl LogicalPlanBuilder {
 
 /// Creates a schema for a join operation.
 /// The fields from the left side are first
+/// join请求 将2个schema进行合并
 pub fn build_join_schema(
     left: &DFSchema,
     right: &DFSchema,
@@ -1046,7 +1159,7 @@ pub fn build_join_schema(
 
     let fields: Vec<DFField> = match join_type {
         JoinType::Inner | JoinType::Full | JoinType::Right => {
-            // left then right
+            // left then right    右连接为什么左边不需要设置成nullable呢
             left_fields
                 .iter()
                 .chain(right_fields.iter())
@@ -1055,6 +1168,7 @@ pub fn build_join_schema(
         }
         JoinType::Left => {
             // left then right, right set to nullable in case of not matched scenario
+            // 因为左连接 左边的数据总会展示 右边没有符合条件的记录 col会自动变成null
             let right_fields_nullable: Vec<DFField> = right_fields
                 .iter()
                 .map(|f| f.clone().with_nullable(true))
@@ -1066,6 +1180,7 @@ pub fn build_join_schema(
                 .cloned()
                 .collect()
         }
+        // TODO
         JoinType::LeftSemi | JoinType::LeftAnti => {
             // Only use the left side for the schema
             left_fields.clone()
@@ -1082,9 +1197,10 @@ pub fn build_join_schema(
 }
 
 /// Errors if one or more expressions have equal names.
+/// 检测是否出现了重名对象
 pub(crate) fn validate_unique_names<'a>(
     node_name: &str,
-    expressions: impl IntoIterator<Item = &'a Expr>,
+    expressions: impl IntoIterator<Item = &'a Expr>, // 检查表达式
 ) -> Result<()> {
     let mut unique_names = HashMap::new();
     expressions.into_iter().enumerate().try_for_each(|(position, expr)| {
@@ -1117,6 +1233,7 @@ pub fn project_with_column_index(
         .map(|(i, e)| match e {
             ignore_alias @ Expr::Alias { .. } => ignore_alias,
             ignore_col @ Expr::Column { .. } => ignore_col,
+            // 给其他类型套上一层别名
             x => x.alias(schema.field(i).name()),
         })
         .collect::<Vec<_>>();
@@ -1126,11 +1243,13 @@ pub fn project_with_column_index(
 }
 
 /// Union two logical plans.
+/// 将2个对象进行组合
 pub fn union(left_plan: LogicalPlan, right_plan: LogicalPlan) -> Result<LogicalPlan> {
     let left_col_num = left_plan.schema().fields().len();
 
     // check union plan length same.
     let right_col_num = right_plan.schema().fields().len();
+    // 合并的2个表 列数要一致
     if right_col_num != left_col_num {
         return Err(DataFusionError::Plan(format!(
             "Union queries must have the same number of columns, (left is {left_col_num}, right is {right_col_num})")
@@ -1142,6 +1261,8 @@ pub fn union(left_plan: LogicalPlan, right_plan: LogicalPlan) -> Result<LogicalP
         .map(|i| {
             let left_field = left_plan.schema().field(i);
             let right_field = right_plan.schema().field(i);
+
+            // 左右2个表达式的 is_nullable/data_type 合并后得到field
             let nullable = left_field.is_nullable() || right_field.is_nullable();
             let data_type =
                 comparison_coercion(left_field.data_type(), right_field.data_type())
@@ -1172,6 +1293,7 @@ pub fn union(left_plan: LogicalPlan, right_plan: LogicalPlan) -> Result<LogicalP
             x => vec![Arc::new(x)],
         })
         .map(|p| {
+            // 简单理解就是在col与schema类型不匹配的情况下 套上一层Cast
             let plan = coerce_plan_expr_for_schema(&p, &union_schema)?;
             match plan {
                 LogicalPlan::Projection(Projection { expr, input, .. }) => {
@@ -1201,9 +1323,10 @@ pub fn union(left_plan: LogicalPlan, right_plan: LogicalPlan) -> Result<LogicalP
 /// This function errors under any of the following conditions:
 /// * Two or more expressions have the same name
 /// * An invalid expression is used (e.g. a `sort` expression)
+/// 在原逻辑计划基础上 追加投影表达式
 pub fn project(
     plan: LogicalPlan,
-    expr: impl IntoIterator<Item = impl Into<Expr>>,
+    expr: impl IntoIterator<Item = impl Into<Expr>>,  // 每个expr对应一个要展示的列
 ) -> Result<LogicalPlan> {
     let input_schema = plan.schema();
     let mut projected_expr = vec![];
@@ -1216,12 +1339,15 @@ pub fn project(
             Expr::QualifiedWildcard { ref qualifier } => {
                 projected_expr.extend(expand_qualified_wildcard(qualifier, input_schema)?)
             }
+            // TODO 忽略前2个
+            // 简单来说就是对col进行标准化后存入projected_expr
             _ => projected_expr
                 .push(columnize_expr(normalize_col(e, &plan)?, input_schema)),
         }
     }
     validate_unique_names("Projections", projected_expr.iter())?;
     let input_schema = DFSchema::new_with_metadata(
+        // 根据plan信息将expr 转换成field
         exprlist_to_fields(&projected_expr, &plan)?,
         plan.schema().metadata().clone(),
     )?;
@@ -1234,6 +1360,7 @@ pub fn project(
 }
 
 /// Create a SubqueryAlias to wrap a LogicalPlan.
+/// 给子查询套上一层别名
 pub fn subquery_alias(
     plan: LogicalPlan,
     alias: impl Into<OwnedTableReference>,
@@ -1247,7 +1374,7 @@ pub fn subquery_alias(
 /// This is mostly used for testing and documentation.
 pub fn table_scan<'a>(
     name: Option<impl Into<TableReference<'a>>>,
-    table_schema: &Schema,
+    table_schema: &Schema,  // 这个方法产生的scan 实际上没有数据可查询    因为只能从tableSource中得到表结构 无法得到查询数据的逻辑计划
     projection: Option<Vec<usize>>,
 ) -> Result<LogicalPlanBuilder> {
     let table_source = table_source(table_schema);
@@ -1264,6 +1391,7 @@ fn table_source(table_schema: &Schema) -> Arc<dyn TableSource> {
 }
 
 /// Wrap projection for a plan, if the join keys contains normal expression.
+/// 对join结果加上一层投影
 pub fn wrap_projection_for_join_if_necessary(
     join_keys: &[Expr],
     input: LogicalPlan,
@@ -1289,6 +1417,7 @@ pub fn wrap_projection_for_join_if_necessary(
         })
         .collect::<Vec<_>>();
 
+    // 有不是column的 join_key 就代表需要追加投影
     let need_project = join_keys.iter().any(|key| !matches!(key, Expr::Column(_)));
     let plan = if need_project {
         let mut projection = expand_wildcard(input_schema, &input)?;
@@ -1343,9 +1472,11 @@ impl TableSource for LogicalTableSource {
 
 /// Create an unnest plan.
 pub fn unnest(input: LogicalPlan, column: Column) -> Result<LogicalPlan> {
+    // 从schema中找到col对应的field
     let unnest_field = input.schema().field_from_column(&column)?;
 
     // Extract the type of the nested field in the list.
+    // 主要是针对List类型 将元素类型抽取出来
     let unnested_field = match unnest_field.data_type() {
         DataType::List(field)
         | DataType::FixedSizeList(field, _)
@@ -1367,6 +1498,7 @@ pub fn unnest(input: LogicalPlan, column: Column) -> Result<LogicalPlan> {
         .fields()
         .iter()
         .map(|f| {
+            // 将list类型替换成了内部类型
             if f == unnest_field {
                 unnested_field.clone()
             } else {
@@ -1380,8 +1512,10 @@ pub fn unnest(input: LogicalPlan, column: Column) -> Result<LogicalPlan> {
         input_schema.metadata().clone(),
     )?);
 
+    // 用Unnest表示内部的list类型已经被解除嵌套了
     Ok(LogicalPlan::Unnest(Unnest {
         input: Arc::new(input),
+        // 表示哪个col被解除嵌套
         column: unnested_field.qualified_column(),
         schema,
     }))

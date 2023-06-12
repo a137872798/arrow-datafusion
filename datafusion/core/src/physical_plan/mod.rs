@@ -44,6 +44,7 @@ use std::task::{Context, Poll};
 use std::{any::Any, pin::Pin};
 
 /// Trait for types that stream [arrow::record_batch::RecordBatch]
+/// RecordBatch 对应行记录  这个特征的特点是 可以获得行记录的schema
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     /// Returns the schema of this `RecordBatchStream`.
     ///
@@ -56,7 +57,7 @@ pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
 pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
 
 /// EmptyRecordBatchStream can be used to create a RecordBatchStream
-/// that will produce no results
+/// that will produce no results     代表空数据流  但是也有schema
 pub struct EmptyRecordBatchStream {
     /// Schema wrapped by Arc
     schema: SchemaRef,
@@ -78,6 +79,7 @@ impl RecordBatchStream for EmptyRecordBatchStream {
 impl Stream for EmptyRecordBatchStream {
     type Item = Result<RecordBatch>;
 
+    // 空数据流 直接返回None
     fn poll_next(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -99,20 +101,24 @@ pub use self::planner::PhysicalPlanner;
 /// [`ExecutionPlan`] can be displayed in a simplified form using the
 /// return value from [`displayable`] in addition to the (normally
 /// quite verbose) `Debug` output.
+/// 这个就是物理执行计划  
 pub trait ExecutionPlan: Debug + Send + Sync {
     /// Returns the execution plan as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
     /// Get the schema for this execution plan
+    /// 获取计划关联的schema
     fn schema(&self) -> SchemaRef;
 
     /// Specifies the output partitioning scheme of this plan
+    /// 采用的分区算法
     fn output_partitioning(&self) -> Partitioning;
 
     /// Specifies whether this plan generates an infinite stream of records.
     /// If the plan does not support pipelining, but it its input(s) are
     /// infinite, returns an error to indicate this.
+    /// 判断产生的结果是否是无限的   默认false
     fn unbounded_output(&self, _children: &[bool]) -> Result<bool> {
         Ok(false)
     }
@@ -127,10 +133,12 @@ pub trait ExecutionPlan: Debug + Send + Sync {
     ///
     /// It is safe to return `None` here if your operator does not
     /// have any particular output order here
+    /// 描述输出结果如何排序
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]>;
 
     /// Specifies the data distribution requirements for all the
     /// children for this operator, By default it's [[Distribution::UnspecifiedDistribution]] for each child,
+    /// 是否需要分区
     fn required_input_distribution(&self) -> Vec<Distribution> {
         vec![Distribution::UnspecifiedDistribution; self.children().len()]
     }
@@ -162,6 +170,7 @@ pub trait ExecutionPlan: Debug + Send + Sync {
     /// WARNING: if you override this default, you *MUST* ensure that
     /// the operator's maintains the ordering invariant or else
     /// DataFusion may produce incorrect results.
+    /// 是否要保持输入时的数据顺序
     fn maintains_input_order(&self) -> Vec<bool> {
         vec![false; self.children().len()]
     }
@@ -183,6 +192,7 @@ pub trait ExecutionPlan: Debug + Send + Sync {
     }
 
     /// Get the EquivalenceProperties within the plan
+    /// 用于判断是否相等
     fn equivalence_properties(&self) -> EquivalenceProperties {
         EquivalenceProperties::new(self.schema())
     }
@@ -190,15 +200,18 @@ pub trait ExecutionPlan: Debug + Send + Sync {
     /// Get a list of child execution plans that provide the input for this plan. The returned list
     /// will be empty for leaf nodes, will contain a single value for unary nodes, or two
     /// values for binary nodes (such as joins).
+    /// 因为是嵌套结构
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>>;
 
     /// Returns a new plan where all children were replaced by new plans.
+    /// 替换内部的计划
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>>;
 
     /// creates an iterator
+    /// 执行计划支持多分区执行  这里是执行某个分区
     fn execute(
         &self,
         partition: usize,
@@ -241,6 +254,8 @@ pub trait ExecutionPlan: Debug + Send + Sync {
 ///     2. CoalescePartitionsExec for collapsing all of the partitions into one without ordering guarantee
 ///     3. SortPreservingMergeExec for collapsing all of the sorted partitions into one with ordering guarantee
 pub fn need_data_exchange(plan: Arc<dyn ExecutionPlan>) -> bool {
+
+    // 对应需要重新分区的执行计划
     if let Some(repart) = plan.as_any().downcast_ref::<RepartitionExec>() {
         !matches!(
             repart.output_partitioning(),
@@ -266,6 +281,7 @@ pub fn need_data_exchange(plan: Arc<dyn ExecutionPlan>) -> bool {
 /// The size of `children` must be equal to the size of `ExecutionPlan::children()`.
 /// Allow the vtable address comparisons for ExecutionPlan Trait Objects，it is harmless even
 /// in the case of 'false-native'.
+/// 替换children
 #[allow(clippy::vtable_address_comparisons)]
 pub fn with_new_children_if_necessary(
     plan: Arc<dyn ExecutionPlan>,
@@ -276,6 +292,7 @@ pub fn with_new_children_if_necessary(
         Err(DataFusionError::Internal(
             "Wrong number of children".to_string(),
         ))
+        // 有任意一个plan发生变化 就可以替换了
     } else if children.is_empty()
         || children
             .iter()
@@ -338,6 +355,7 @@ pub fn displayable(plan: &dyn ExecutionPlan) -> DisplayableExecutionPlan<'_> {
 // Note that this would be really nice if it were a method on
 // ExecutionPlan, but it can not be because it takes a generic
 // parameter and `ExecutionPlan` is a trait
+// 使用visitor处理所有遇到的plan
 pub fn accept<V: ExecutionPlanVisitor>(
     plan: &dyn ExecutionPlan,
     visitor: &mut V,
@@ -404,6 +422,7 @@ pub fn visit_execution_plan<V: ExecutionPlanVisitor>(
 ) -> Result<(), V::Error> {
     visitor.pre_visit(plan)?;
     for child in plan.children() {
+        // 这个也是递归的啊
         visit_execution_plan(child.as_ref(), visitor)?;
     }
     visitor.post_visit(plan)?;
@@ -411,6 +430,7 @@ pub fn visit_execution_plan<V: ExecutionPlanVisitor>(
 }
 
 /// Execute the [ExecutionPlan] and collect the results in memory
+/// 在该上下文下执行物理计划 并收集结果
 pub async fn collect(
     plan: Arc<dyn ExecutionPlan>,
     context: Arc<TaskContext>,
@@ -420,11 +440,13 @@ pub async fn collect(
 }
 
 /// Execute the [ExecutionPlan] and return a single stream of results
+/// 返回一个流对象
 pub fn execute_stream(
     plan: Arc<dyn ExecutionPlan>,
     context: Arc<TaskContext>,
 ) -> Result<SendableRecordBatchStream> {
     match plan.output_partitioning().partition_count() {
+        // 取出分区数
         0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
         1 => plan.execute(0, context),
         _ => {
@@ -432,12 +454,14 @@ pub fn execute_stream(
             let plan = CoalescePartitionsExec::new(plan.clone());
             // CoalescePartitionsExec must produce a single partition
             assert_eq!(1, plan.output_partitioning().partition_count());
+            // 执行该plan会处理所有分区数据
             plan.execute(0, context)
         }
     }
 }
 
 /// Execute the [ExecutionPlan] and collect the results in memory
+/// 产生结果并进行分区
 pub async fn collect_partitioned(
     plan: Arc<dyn ExecutionPlan>,
     context: Arc<TaskContext>,
@@ -457,6 +481,7 @@ pub fn execute_stream_partitioned(
 ) -> Result<Vec<SendableRecordBatchStream>> {
     let num_partitions = plan.output_partitioning().partition_count();
     let mut streams = Vec::with_capacity(num_partitions);
+    // 这里根据分区数 分别调用execute并将结果存储在streams中
     for i in 0..num_partitions {
         streams.push(plan.execute(i, context.clone())?);
     }
@@ -464,19 +489,22 @@ pub fn execute_stream_partitioned(
 }
 
 /// Partitioning schemes supported by operators.
+/// 数据分区算法
 #[derive(Debug, Clone)]
 pub enum Partitioning {
-    /// Allocate batches using a round-robin algorithm and the specified number of partitions
+    /// Allocate batches using a round-robin algorithm and the specified number of partitions  轮询
     RoundRobinBatch(usize),
     /// Allocate rows based on a hash of one of more expressions and the specified number of
-    /// partitions
+    /// partitions   基于一个或多个表达式计算hash值   应该是代表参与hash计算的column
     Hash(Vec<Arc<dyn PhysicalExpr>>, usize),
     /// Unknown partitioning scheme with a known number of partitions
     UnknownPartitioning(usize),
 }
 
 impl Partitioning {
+
     /// Returns the number of partitions in this partitioning scheme
+    /// 返回分区数
     pub fn partition_count(&self) -> usize {
         use Partitioning::*;
         match self {
@@ -486,31 +514,38 @@ impl Partitioning {
 
     /// Returns true when the guarantees made by this [[Partitioning]] are sufficient to
     /// satisfy the partitioning scheme mandated by the `required` [[Distribution]]
+    /// 判断此时的分区数是否满足分布方式
     pub fn satisfy<F: FnOnce() -> EquivalenceProperties>(
         &self,
         required: Distribution,
         equal_properties: F,
     ) -> bool {
         match required {
+            // 分布方式
             Distribution::UnspecifiedDistribution => true,
             Distribution::SinglePartition if self.partition_count() == 1 => true,
+            // 代表需要基于这些表达式进行分区
             Distribution::HashPartitioned(required_exprs) => {
                 match self {
                     // Here we do not check the partition count for hash partitioning and assumes the partition count
                     // and hash functions in the system are the same. In future if we plan to support storage partition-wise joins,
                     // then we need to have the partition count and hash functions validation.
                     Partitioning::Hash(partition_exprs, _) => {
+
+                        // 快速匹配
                         let fast_match =
                             expr_list_eq_strict_order(&required_exprs, partition_exprs);
                         // If the required exprs do not match, need to leverage the eq_properties provided by the child
                         // and normalize both exprs based on the eq_properties
                         if !fast_match {
+                            // 产生用于判断相等的prop
                             let eq_properties = equal_properties();
                             let eq_classes = eq_properties.classes();
                             if !eq_classes.is_empty() {
                                 let normalized_required_exprs = required_exprs
                                     .iter()
                                     .map(|e| {
+                                        // 每个表达式和eq_classes组成一个新的表达式
                                         normalize_expr_with_equivalence_properties(
                                             e.clone(),
                                             eq_classes,
@@ -565,17 +600,18 @@ impl PartialEq for Partitioning {
 /// Distribution schemes
 #[derive(Debug, Clone)]
 pub enum Distribution {
-    /// Unspecified distribution
+    /// Unspecified distribution   未指明分布
     UnspecifiedDistribution,
-    /// A single partition is required
+    /// A single partition is required   仅需要一个分区
     SinglePartition,
     /// Requires children to be distributed in such a way that the same
-    /// values of the keys end up in the same partition
+    /// values of the keys end up in the same partition   通过计算得到相同key的数据会分散到一个分区
     HashPartitioned(Vec<Arc<dyn PhysicalExpr>>),
 }
 
 impl Distribution {
     /// Creates a Partitioning for this Distribution to satisfy itself
+    /// 根据分布情况 产生分区
     pub fn create_partitioning(&self, partition_count: usize) -> Partitioning {
         match self {
             Distribution::UnspecifiedDistribution => {
@@ -626,6 +662,7 @@ use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortRequirement};
 ///
 /// assert_eq!(projected_schema, expected_schema);
 /// ```
+/// 在scan的时候 可能只要读取部分列 在处理后得到一个新的schema
 pub fn project_schema(
     schema: &SchemaRef,
     projection: Option<&Vec<usize>>,

@@ -25,6 +25,7 @@ use datafusion_expr::ColumnarValue;
 use std::sync::Arc;
 
 /// Represents Sort operation for a column in a RecordBatch
+/// 用于表示排序的一个物理计划
 #[derive(Clone, Debug)]
 pub struct PhysicalSortExpr {
     /// Physical expression representing the column to sort
@@ -46,7 +47,9 @@ impl std::fmt::Display for PhysicalSortExpr {
 }
 
 impl PhysicalSortExpr {
+
     /// evaluate the sort expression into SortColumn that can be passed into arrow sort kernel
+    /// 对列数据进行排序
     pub fn evaluate_to_sort_column(&self, batch: &RecordBatch) -> Result<SortColumn> {
         let value_to_sort = self.expr.evaluate(batch)?;
         let array_to_sort = match value_to_sort {

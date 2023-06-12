@@ -31,7 +31,7 @@ use datafusion_common::Result;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{ColumnarValue, Expr};
 
-/// Represents a literal value
+/// Represents a literal value  物理表达式 对应一个标量
 #[derive(Debug, PartialEq, Eq)]
 pub struct Literal {
     value: ScalarValue,
@@ -62,6 +62,7 @@ impl PhysicalExpr for Literal {
     }
 
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
+        // 直接获取字面量的类型
         Ok(self.value.get_datatype())
     }
 
@@ -86,6 +87,7 @@ impl PhysicalExpr for Literal {
 
     /// Return the boundaries of this literal expression (which is the same as
     /// the value it represents).
+    /// 因为值已经是确定的了  所以可以直接设置boundaries
     fn analyze(&self, context: AnalysisContext) -> AnalysisContext {
         context.with_boundaries(Some(ExprBoundaries::new(
             self.value.clone(),

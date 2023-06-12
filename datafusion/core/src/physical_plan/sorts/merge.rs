@@ -51,14 +51,16 @@ macro_rules! merge_helper {
 }
 
 /// Perform a streaming merge of [`SendableRecordBatchStream`]
+/// 将多个数据流聚合
 pub(crate) fn streaming_merge(
     streams: Vec<SendableRecordBatchStream>,
     schema: SchemaRef,
-    expressions: &[PhysicalSortExpr],
+    expressions: &[PhysicalSortExpr],  // 需要按这个顺序输出流
     tracking_metrics: MemTrackingMetrics,
     batch_size: usize,
 ) -> Result<SendableRecordBatchStream> {
     // Special case single column comparisons with optimized cursor implementations
+    // 只有一个排序列
     if expressions.len() == 1 {
         let sort = expressions[0].clone();
         let data_type = sort.expr.data_type(schema.as_ref())?;
@@ -72,7 +74,10 @@ pub(crate) fn streaming_merge(
         }
     }
 
+    // 使用多个排序列
     let streams = RowCursorStream::try_new(schema.as_ref(), expressions, streams)?;
+
+    // 无论有多少排序列  最终都是生成SortPreservingMergeStream对象
     Ok(Box::pin(SortPreservingMergeStream::new(
         Box::new(streams),
         schema,
@@ -84,6 +89,7 @@ pub(crate) fn streaming_merge(
 /// A fallible [`PartitionedStream`] of [`Cursor`] and [`RecordBatch`]
 type CursorStream<C> = Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
 
+/// 该对象包含了多个流  并按照顺序将他们输出
 #[derive(Debug)]
 struct SortPreservingMergeStream<C> {
     in_progress: BatchBuilder,
@@ -94,7 +100,7 @@ struct SortPreservingMergeStream<C> {
     /// used to record execution metrics
     tracking_metrics: MemTrackingMetrics,
 
-    /// If the stream has encountered an error
+    /// If the stream has encountered an error   代表遇到了错误
     aborted: bool,
 
     /// A loser tree that always produces the minimum cursor
@@ -121,12 +127,13 @@ struct SortPreservingMergeStream<C> {
     batch_size: usize,
 
     /// Vector that holds cursors for each non-exhausted input partition
+    /// 维护每个stream的数据光标  因为每个stream内的数据已经提前排序好了
     cursors: Vec<Option<C>>,
 }
 
 impl<C: Cursor> SortPreservingMergeStream<C> {
     fn new(
-        streams: CursorStream<C>,
+        streams: CursorStream<C>,   // 对应一个分区流 每个分区对应内部一个stream  (本对象内部有多个stream)
         schema: SchemaRef,
         tracking_metrics: MemTrackingMetrics,
         batch_size: usize,
@@ -134,6 +141,7 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
         let stream_count = streams.partitions();
 
         Self {
+            // 存储数据的容器
             in_progress: BatchBuilder::new(schema, stream_count, batch_size),
             streams,
             tracking_metrics,
@@ -148,11 +156,13 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
     /// If the stream at the given index is not exhausted, and the last cursor for the
     /// stream is finished, poll the stream for the next RecordBatch and create a new
     /// cursor for the stream from the returned result
+    /// 加载某个stream的数据
     fn maybe_poll_stream(
         &mut self,
         cx: &mut Context<'_>,
         idx: usize,
     ) -> Poll<Result<()>> {
+        // 代表该stream此时有还未消化的数据
         if self.cursors[idx].is_some() {
             // Cursor is not finished - don't need a new RecordBatch yet
             return Poll::Ready(Ok(()));
@@ -161,6 +171,8 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
         match futures::ready!(self.streams.poll_next(cx, idx)) {
             None => Poll::Ready(Ok(())),
             Some(Err(e)) => Poll::Ready(Err(e)),
+
+            // 代表stream的数据被加载到内存中    cursor对应排序列的值    batch对应数据集
             Some(Ok((cursor, batch))) => {
                 self.cursors[idx] = Some(cursor);
                 self.in_progress.push_batch(idx, batch);
@@ -169,6 +181,7 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
         }
     }
 
+    // 该方法作为读取流的入口  触发内部数据排序
     fn poll_next_inner(
         &mut self,
         cx: &mut Context<'_>,
@@ -177,15 +190,19 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
             return Poll::Ready(None);
         }
         // try to initialize the loser tree
+        // 一开始 tree内部无数据
         if self.loser_tree.is_empty() {
             // Ensure all non-exhausted streams have a cursor from which
             // rows can be pulled
+            // 先加载每个stream的数据
             for i in 0..self.streams.partitions() {
                 if let Err(e) = ready!(self.maybe_poll_stream(cx, i)) {
                     self.aborted = true;
                     return Poll::Ready(Some(Err(e)));
                 }
             }
+            // 此时数据已经被加载到内存中了  可以初始化loser_tree了
+            // 调用完后 会将当前cursor的所有值按照顺序在tree内排好
             self.init_loser_tree();
         }
 
@@ -196,24 +213,33 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
 
         loop {
             // Adjust the loser tree if necessary, returning control if needed
+            // 代表tree中的光标已经被更新  需要更新树的head节点
             if !self.loser_tree_adjusted {
+                // winner对应的时 stream_idx
                 let winner = self.loser_tree[0];
+
+                // 确保数据已经加载
                 if let Err(e) = ready!(self.maybe_poll_stream(cx, winner)) {
                     self.aborted = true;
                     return Poll::Ready(Some(Err(e)));
                 }
+                // 二叉堆那套
                 self.update_loser_tree();
             }
 
+            // 代表需要读取该stream的下一条记录
             let stream_idx = self.loser_tree[0];
+            // 推进光标
             if self.advance(stream_idx) {
                 self.loser_tree_adjusted = false;
+                // 存储下一行数据所在的stream
                 self.in_progress.push_row(stream_idx);
                 if self.in_progress.len() < self.batch_size {
                     continue;
                 }
             }
 
+            // 当in_progress内囤积了一个batch的数据时 产生batch数据并返回
             return Poll::Ready(self.in_progress.build_record_batch().transpose());
         }
     }
@@ -223,6 +249,7 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
         match slot.as_mut() {
             Some(c) => {
                 c.advance();
+                // 当该数据消化完后要滞空 之后会触发下一批的拉取
                 if c.is_finished() {
                     *slot = None;
                 }
@@ -244,14 +271,21 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
 
     /// Attempts to initialize the loser tree with one value from each
     /// non exhausted input, if possible
+    /// 初始化树结构   可以看作一个堆
     fn init_loser_tree(&mut self) {
         // Init loser tree
+        // 长度与stream数量一致
         self.loser_tree = vec![usize::MAX; self.cursors.len()];
         for i in 0..self.cursors.len() {
             let mut winner = i;
+            // 转换为要比较的树节点   按照堆的特性 这样刚好可以排满整棵树
             let mut cmp_node = (self.cursors.len() + i) / 2;
+
+            // 一开始node都是Max先忽略
             while cmp_node != 0 && self.loser_tree[cmp_node] != usize::MAX {
+                // 当节点已经有一个非Max的值时
                 let challenger = self.loser_tree[cmp_node];
+                // 如果本次的值更小 会向tree的头部推进  就像二叉堆一样
                 if self.is_gt(winner, challenger) {
                     self.loser_tree[cmp_node] = winner;
                     winner = challenger;
@@ -282,6 +316,7 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
     }
 }
 
+// 外部通过将SortPreservingMergeStream看作普通stream 来读取数据
 impl<C: Cursor + Unpin> Stream for SortPreservingMergeStream<C> {
     type Item = Result<RecordBatch>;
 

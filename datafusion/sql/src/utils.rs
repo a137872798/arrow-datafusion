@@ -60,9 +60,10 @@ pub(crate) fn resolve_columns(expr: &Expr, plan: &LogicalPlan) -> Result<Expr> {
 /// where post-aggregation, `a + b` need not be a projection against the
 /// individual columns `a` and `b`, but rather it is a projection against the
 /// `a + b` found in the GROUP BY.
+/// 尝试修改expr
 pub(crate) fn rebase_expr(
     expr: &Expr,
-    base_exprs: &[Expr],
+    base_exprs: &[Expr],  // 分组列和聚合列
     plan: &LogicalPlan,
 ) -> Result<Expr> {
     clone_with_replacement(expr, &|nested_expr| {
@@ -156,6 +157,7 @@ where
 {
     let replacement_opt = replacement_fn(expr)?;
 
+    // 下面这些冗长的表达式主要是表达如何通过递归找到需要的expr
     match replacement_opt {
         // If we were provided a replacement, use the replacement. Do not
         // descend further.
@@ -436,9 +438,10 @@ pub(crate) fn extract_aliases(exprs: &[Expr]) -> HashMap<String, Expr> {
 /// Given an expression that's literal int encoding position, lookup the corresponding expression
 /// in the select_exprs list, if the index is within the bounds and it is indeed a position literal;
 /// Otherwise, return None
+/// 如果expr是一个下标  从select column中找到对应的表达式
 pub(crate) fn resolve_positions_to_exprs(
     expr: &Expr,
-    select_exprs: &[Expr],
+    select_exprs: &[Expr],  // select要展示的字段
 ) -> Option<Expr> {
     match expr {
         // sql_expr_to_logical_expr maps number to i64
@@ -459,12 +462,15 @@ pub(crate) fn resolve_positions_to_exprs(
 
 /// Rebuilds an `Expr` with columns that refer to aliases replaced by the
 /// alias' underlying `Expr`.
+/// 相当于为不知道所属表的列绑定表信息
 pub(crate) fn resolve_aliases_to_exprs(
     expr: &Expr,
     aliases: &HashMap<String, Expr>,
 ) -> Result<Expr> {
     clone_with_replacement(expr, &|nested_expr| match nested_expr {
+        // 遇到column表达式  如果该列不知道自己所属的表
         Expr::Column(c) if c.relation.is_none() => {
+            // 从别名容器中找到并替换
             if let Some(aliased_expr) = aliases.get(&c.name) {
                 Ok(Some(aliased_expr.clone()))
             } else {
@@ -477,6 +483,7 @@ pub(crate) fn resolve_aliases_to_exprs(
 
 /// given a slice of window expressions sharing the same sort key, find their common partition
 /// keys.
+/// 找到这组窗口表达式公有的分区键
 pub fn window_expr_common_partition_keys(window_exprs: &[Expr]) -> Result<&[Expr]> {
     let all_partition_keys = window_exprs
         .iter()
@@ -493,11 +500,14 @@ pub fn window_expr_common_partition_keys(window_exprs: &[Expr]) -> Result<&[Expr
                     ))),
                 }
             }
+            // 不支持其他情况
             expr => Err(DataFusionError::Execution(format!(
                 "Impossibly got non-window expr {expr:?}"
             ))),
         })
         .collect::<Result<Vec<_>>>()?;
+
+    // 返回使用到的最小分区键
     let result = all_partition_keys
         .iter()
         .min_by_key(|s| s.len())

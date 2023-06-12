@@ -58,6 +58,7 @@ pub type JoinOnRef<'a> = &'a [(Column, Column)];
 
 /// Checks whether the schemas "left" and "right" and columns "on" represent a valid join.
 /// They are valid whenever their columns' intersection equals the set `on`
+/// 检查join的列是否有效
 pub fn check_join_is_valid(left: &Schema, right: &Schema, on: JoinOnRef) -> Result<()> {
     let left: HashSet<Column> = left
         .fields()
@@ -77,17 +78,20 @@ pub fn check_join_is_valid(left: &Schema, right: &Schema, on: JoinOnRef) -> Resu
 
 /// Checks whether the sets left, right and on compose a valid join.
 /// They are valid whenever their intersection equals the set `on`
+/// 检查join的列是否有效
 fn check_join_set_is_valid(
     left: &HashSet<Column>,
     right: &HashSet<Column>,
     on: &[(Column, Column)],
 ) -> Result<()> {
+
     let on_left = &on.iter().map(|on| on.0.clone()).collect::<HashSet<_>>();
     let left_missing = on_left.difference(left).collect::<HashSet<_>>();
 
     let on_right = &on.iter().map(|on| on.1.clone()).collect::<HashSet<_>>();
     let right_missing = on_right.difference(right).collect::<HashSet<_>>();
 
+    // 代表连接键没有出现在表上
     if !left_missing.is_empty() | !right_missing.is_empty() {
         return Err(DataFusionError::Plan(format!(
                 "The left or right side of the join does not have all columns on \"on\": \nMissing on the left: {left_missing:?}\nMissing on the right: {right_missing:?}",
@@ -120,14 +124,16 @@ pub fn partitioned_join_output_partitioning(
 
 /// Adjust the right out partitioning to new Column Index
 pub fn adjust_right_output_partitioning(
-    right_partitioning: Partitioning,
-    left_columns_len: usize,
+    right_partitioning: Partitioning,  // 右侧计划采用的分区算法
+    left_columns_len: usize,   // 左侧的列数量
 ) -> Partitioning {
     match right_partitioning {
         Partitioning::RoundRobinBatch(size) => Partitioning::RoundRobinBatch(size),
         Partitioning::UnknownPartitioning(size) => {
             Partitioning::UnknownPartitioning(size)
         }
+
+        // 主要是影响hash算法
         Partitioning::Hash(exprs, size) => {
             let new_exprs = exprs
                 .into_iter()
@@ -135,6 +141,7 @@ pub fn adjust_right_output_partitioning(
                     expr.transform_down(&|e| match e.as_any().downcast_ref::<Column>() {
                         Some(col) => Ok(Transformed::Yes(Arc::new(Column::new(
                             col.name(),
+                            // 因为连表后 schema变了  右表的列对应的下标变了 需要调整expr的下标才能确保找到正确的列
                             left_columns_len + col.index(),
                         )))),
                         None => Ok(Transformed::No(e)),
@@ -152,14 +159,16 @@ pub fn combine_join_equivalence_properties(
     join_type: JoinType,
     left_properties: EquivalenceProperties,
     right_properties: EquivalenceProperties,
-    left_columns_len: usize,
-    on: &[(Column, Column)],
-    schema: SchemaRef,
+    left_columns_len: usize,  // 左表列数量
+    on: &[(Column, Column)],  // 连接键 允许为空
+    schema: SchemaRef,  // join之后的schema
 ) -> EquivalenceProperties {
     let mut new_properties = EquivalenceProperties::new(schema);
     match join_type {
         JoinType::Inner | JoinType::Left | JoinType::Full | JoinType::Right => {
             new_properties.extend(left_properties.classes().to_vec());
+
+            // 右表的col下标要变动
             let new_right_properties = right_properties
                 .classes()
                 .iter()
@@ -181,6 +190,8 @@ pub fn combine_join_equivalence_properties(
 
             new_properties.extend(new_right_properties);
         }
+
+        // TODO
         JoinType::LeftSemi | JoinType::LeftAnti => {
             new_properties.extend(left_properties.classes().to_vec())
         }
@@ -259,18 +270,19 @@ impl JoinSide {
 pub struct ColumnIndex {
     /// Index of the column
     pub index: usize,
-    /// Whether the column is at the left or right side
+    /// Whether the column is at the left or right side   表明对应左表的列 还是右表的列
     pub side: JoinSide,
 }
 
 /// Filter applied before join output
+/// 在join后使用的where条件
 #[derive(Debug, Clone)]
 pub struct JoinFilter {
-    /// Filter expression
+    /// Filter expression  过滤逻辑
     expression: Arc<dyn PhysicalExpr>,
-    /// Column indices required to construct intermediate batch for filtering
+    /// Column indices required to construct intermediate batch for filtering  过滤字段在左右表schema的下标
     column_indices: Vec<ColumnIndex>,
-    /// Physical schema of intermediate batch
+    /// Physical schema of intermediate batch  过滤用到的字段构成的schema
     schema: Schema,
 }
 
@@ -289,6 +301,7 @@ impl JoinFilter {
     }
 
     /// Helper for building ColumnIndex vector from left and right indices
+    /// 代表join时 用于过滤的列 对应schema的下标
     pub fn build_column_indices(
         left_indices: Vec<usize>,
         right_indices: Vec<usize>,
@@ -324,8 +337,12 @@ impl JoinFilter {
 
 /// Returns the output field given the input field. Outer joins may
 /// insert nulls even if the input was not null
-///
+/// old_field 本次处理的field
+/// join_type 连表类型
+/// is_left 处理的是左表还是右表
 fn output_join_field(old_field: &Field, join_type: &JoinType, is_left: bool) -> Field {
+
+    // 左/右/全连接 需要将field强制变成可为空
     let force_nullable = match join_type {
         JoinType::Inner => false,
         JoinType::Left => !is_left, // right input is padded with nulls
@@ -346,6 +363,7 @@ fn output_join_field(old_field: &Field, join_type: &JoinType, is_left: bool) -> 
 
 /// Creates a schema for a join operation.
 /// The fields from the left side are first
+/// 根据连接类型  将某些field变成nullable  同时合并2表的field
 pub fn build_join_schema(
     left: &Schema,
     right: &Schema,
@@ -353,9 +371,13 @@ pub fn build_join_schema(
 ) -> (Schema, Vec<ColumnIndex>) {
     let (fields, column_indices): (SchemaBuilder, Vec<ColumnIndex>) = match join_type {
         JoinType::Inner | JoinType::Left | JoinType::Full | JoinType::Right => {
+
+            // 主要就是根据连接类型将列变成nullable
+
             let left_fields = left
                 .fields()
                 .iter()
+                // 遍历左表的每个field
                 .map(|f| output_join_field(f, join_type, true))
                 .enumerate()
                 .map(|(index, f)| {
@@ -385,6 +407,7 @@ pub fn build_join_schema(
             // left then right
             left_fields.chain(right_fields).unzip()
         }
+        // TODO
         JoinType::LeftSemi | JoinType::LeftAnti => left
             .fields()
             .iter()
@@ -400,6 +423,7 @@ pub fn build_join_schema(
                 )
             })
             .unzip(),
+        // TODO
         JoinType::RightSemi | JoinType::RightAnti => right
             .fields()
             .iter()
@@ -768,17 +792,21 @@ pub(crate) fn get_final_indices_from_bit_map(
 }
 
 pub(crate) fn apply_join_filter_to_indices(
-    build_input_buffer: &RecordBatch,
-    probe_batch: &RecordBatch,
+    build_input_buffer: &RecordBatch,  // inner表 也就是全部加载到内存了
+    probe_batch: &RecordBatch,  // outer表 用于连接数据的
+    // left indices: [left_index, left_index, ...., left_index]
+    // right indices: [0, 1, 2, 3, 4,....,right_row_count]
     build_indices: UInt64Array,
     probe_indices: UInt32Array,
-    filter: &JoinFilter,
-    build_side: JoinSide,
+    filter: &JoinFilter,  // 用于过滤数据
+    build_side: JoinSide,  // 代表连接类型
 ) -> Result<(UInt64Array, UInt32Array)> {
+    // 无数据  不需要处理
     if build_indices.is_empty() && probe_indices.is_empty() {
         return Ok((build_indices, probe_indices));
     };
 
+    // 已经是以连表的方式展示过滤需要的列值
     let intermediate_batch = build_batch_from_indices(
         filter.schema(),
         build_input_buffer,
@@ -788,12 +816,15 @@ pub(crate) fn apply_join_filter_to_indices(
         filter.column_indices(),
         build_side,
     )?;
+
+    // 将过滤器作用到结果集上 得到处理结果
     let filter_result = filter
         .expression()
         .evaluate(&intermediate_batch)?
         .into_array(intermediate_batch.num_rows());
     let mask = as_boolean_array(&filter_result)?;
 
+    // 在过滤器作用后 只会保留有效的数据  而build_indices实际上就是同一行值重复n次 filter后只是重复次数减少了
     let left_filtered = compute::filter(&build_indices, mask)?;
     let right_filtered = compute::filter(&probe_indices, mask)?;
     Ok((
@@ -805,14 +836,16 @@ pub(crate) fn apply_join_filter_to_indices(
 /// Returns a new [RecordBatch] by combining the `left` and `right` according to `indices`.
 /// The resulting batch has [Schema] `schema`.
 pub(crate) fn build_batch_from_indices(
-    schema: &Schema,
-    build_input_buffer: &RecordBatch,
-    probe_batch: &RecordBatch,
-    build_indices: UInt64Array,
-    probe_indices: UInt32Array,
-    column_indices: &[ColumnIndex],
-    build_side: JoinSide,
+    schema: &Schema,  // 代表只需要保留这些列
+    build_input_buffer: &RecordBatch,  // inner表
+    probe_batch: &RecordBatch,  // outer表
+    build_indices: UInt64Array,  // inner表此时的行号 数量等同于 probe_batch.size
+    probe_indices: UInt32Array,  // 对应outer的行号
+    column_indices: &[ColumnIndex],  // schema所需要的列分别在左右表的位置
+    build_side: JoinSide,  // 连接方式
 ) -> Result<RecordBatch> {
+
+    // 返回空对象
     if schema.fields().is_empty() {
         let options = RecordBatchOptions::new()
             .with_match_field_names(true)
@@ -828,11 +861,17 @@ pub(crate) fn build_batch_from_indices(
     // build the columns of the new [RecordBatch]:
     // 1. pick whether the column is from the left or right
     // 2. based on the pick, `take` items from the different RecordBatches
+    // 因为只需要这些列
     let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
 
+    // 表示需要的列在哪个表上
     for column_index in column_indices {
+
+        // 左连接 并且检索左表 / 右连接 并且检索右表
         let array = if column_index.side == build_side {
+            // 取相关列的数据
             let array = build_input_buffer.column(column_index.index);
+            // 起过滤作用的列没数据
             if array.is_empty() || build_indices.null_count() == build_indices.len() {
                 // Outer join would generate a null index when finding no match at our side.
                 // Therefore, it's possible we are empty but need to populate an n-length null array,
@@ -840,17 +879,22 @@ pub(crate) fn build_batch_from_indices(
                 assert_eq!(build_indices.null_count(), build_indices.len());
                 new_null_array(array.data_type(), build_indices.len())
             } else {
+                // 相当于是取某行值  并且重复多次
                 compute::take(array.as_ref(), &build_indices, None)?
             }
         } else {
+            // 检索另一张表
             let array = probe_batch.column(column_index.index);
             if array.is_empty() || probe_indices.null_count() == probe_indices.len() {
                 assert_eq!(probe_indices.null_count(), probe_indices.len());
                 new_null_array(array.data_type(), probe_indices.len())
             } else {
+                // 这个就是正常获取列值
                 compute::take(array.as_ref(), &probe_indices, None)?
             }
         };
+
+        // 得到的结果是连表后 过滤列的值
         columns.push(array);
     }
     Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -950,18 +994,19 @@ pub(crate) fn get_anti_indices(
         .collect::<UInt32Array>()
 }
 
-/// Get unmatched and deduplicated indices
+/// Get unmatched and deduplicated indices   找到不匹配的下标
 pub(crate) fn get_anti_u64_indices(
-    row_count: usize,
-    input_indices: &UInt64Array,
+    row_count: usize,   // 总行数
+    input_indices: &UInt64Array,  // 存储行号
 ) -> UInt64Array {
     let mut bitmap = BooleanBufferBuilder::new(row_count);
     bitmap.append_n(row_count, false);
+    // 将下标填入位图
     input_indices.iter().flatten().for_each(|v| {
         bitmap.set_bit(v as usize, true);
     });
 
-    // get the anti index
+    // get the anti index   取出false的下标
     (0..row_count)
         .filter_map(|idx| (!bitmap.get_bit(idx)).then_some(idx as u64))
         .collect::<UInt64Array>()

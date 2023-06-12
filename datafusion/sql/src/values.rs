@@ -21,6 +21,8 @@ use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
 use sqlparser::ast::Values as SQLValues;
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 将已经存在的值转换成plan
     pub(super) fn sql_values_to_plan(
         &self,
         values: SQLValues,

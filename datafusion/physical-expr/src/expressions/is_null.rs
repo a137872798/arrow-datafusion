@@ -31,7 +31,7 @@ use datafusion_common::Result;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
 
-/// IS NULL expression
+/// IS NULL expression   判断表达式产生的结果是否为null
 #[derive(Debug)]
 pub struct IsNullExpr {
     /// Input expression

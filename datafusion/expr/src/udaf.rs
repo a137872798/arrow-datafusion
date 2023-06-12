@@ -26,17 +26,18 @@ use std::sync::Arc;
 
 /// Logical representation of a user-defined aggregate function (UDAF)
 /// A UDAF is different from a UDF in that it is stateful across batches.
+/// 用户定义的聚合函数
 #[derive(Clone)]
 pub struct AggregateUDF {
     /// name
     pub name: String,
-    /// signature
+    /// signature  描述参数的类型数量
     pub signature: Signature,
-    /// Return type
+    /// Return type   返回结果类型
     pub return_type: ReturnTypeFunction,
-    /// actual implementation
+    /// actual implementation   根据数据类型产生对应的累加器
     pub accumulator: AccumulatorFunctionImplementation,
-    /// the accumulator's state's description as a function of the return type
+    /// the accumulator's state's description as a function of the return type  聚合函数内部的累加器需要state的支撑 该fun可以得出state的类型
     pub state_type: StateTypeFunction,
 }
 
@@ -85,6 +86,7 @@ impl AggregateUDF {
 
     /// creates a logical expression with a call of the UDAF
     /// This utility allows using the UDAF without requiring access to the registry.
+    /// call 就是将参数与本聚合函数 组合成一个聚合表达式
     pub fn call(&self, args: Vec<Expr>) -> Expr {
         Expr::AggregateUDF {
             fun: Arc::new(self.clone()),

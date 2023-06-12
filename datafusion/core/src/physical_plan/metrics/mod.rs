@@ -69,16 +69,17 @@ pub use value::{Count, Gauge, MetricValue, ScopedTimerGuard, Time, Timestamp};
 ///
 /// [`ExecutionPlan`]: super::ExecutionPlan
 
+/// 代表一个测量指标
 #[derive(Debug)]
 pub struct Metric {
-    /// The value of the metric
+    /// The value of the metric   测量值 可能是时间/标量 或者其他什么的
     value: MetricValue,
 
-    /// arbitrary name=value pairs identifiying this metric
+    /// arbitrary name=value pairs identifiying this metric  该指标拥有一组标签 在基于标签检索指标时就可以用到了
     labels: Vec<Label>,
 
     /// To which partition of an operators output did this metric
-    /// apply? If `None` then means all partitions.
+    /// apply? If `None` then means all partitions.   该指标是关于哪个分区的  None代表针对所有分区
     partition: Option<usize>,
 }
 
@@ -116,6 +117,7 @@ impl Display for Metric {
     }
 }
 
+/// 测量指标
 impl Metric {
     /// Create a new [`Metric`]. Consider using [`MetricBuilder`]
     /// rather than this function directly.
@@ -129,6 +131,7 @@ impl Metric {
 
     /// Create a new [`Metric`]. Consider using [`MetricBuilder`]
     /// rather than this function directly.
+    /// 给指标赋予一组标签
     pub fn new_with_labels(
         value: MetricValue,
         partition: Option<usize>,
@@ -142,6 +145,7 @@ impl Metric {
     }
 
     /// Add a new label to this metric
+    /// 给指标追加一个标签
     pub fn with_label(mut self, label: Label) -> Self {
         self.labels.push(label);
         self
@@ -171,6 +175,7 @@ impl Metric {
 /// A snapshot of the metrics for a particular ([`ExecutionPlan`]).
 ///
 /// [`ExecutionPlan`]: super::ExecutionPlan
+/// 存储一组指标
 #[derive(Default, Debug, Clone)]
 pub struct MetricsSet {
     metrics: Vec<Arc<Metric>>,
@@ -194,6 +199,7 @@ impl MetricsSet {
 
     /// Convenience: return the number of rows produced, aggregated
     /// across partitions or `None` if no metric is present
+    /// OutputRows  代表结果的输出行数
     pub fn output_rows(&self) -> Option<usize> {
         self.sum(|metric| matches!(metric.value(), MetricValue::OutputRows(_)))
             .map(|v| v.as_usize())
@@ -201,6 +207,7 @@ impl MetricsSet {
 
     /// Convenience: return the count of spills, aggregated
     /// across partitions or `None` if no metric is present
+    /// 返回溢出的数量
     pub fn spill_count(&self) -> Option<usize> {
         self.sum(|metric| matches!(metric.value(), MetricValue::SpillCount(_)))
             .map(|v| v.as_usize())
@@ -208,6 +215,7 @@ impl MetricsSet {
 
     /// Convenience: return the total byte size of spills, aggregated
     /// across partitions or `None` if no metric is present
+    /// 溢出字节大小
     pub fn spilled_bytes(&self) -> Option<usize> {
         self.sum(|metric| matches!(metric.value(), MetricValue::SpilledBytes(_)))
             .map(|v| v.as_usize())
@@ -215,6 +223,7 @@ impl MetricsSet {
 
     /// Convenience: return the amount of elapsed CPU time spent,
     /// aggregated across partitions or `None` if no metric is present
+    /// 返回消耗的cpu时间
     pub fn elapsed_compute(&self) -> Option<usize> {
         self.sum(|metric| matches!(metric.value(), MetricValue::ElapsedCompute(_)))
             .map(|v| v.as_usize())
@@ -227,6 +236,7 @@ impl MetricsSet {
     where
         F: FnMut(&Metric) -> bool,
     {
+        // 返回符合条件的指标
         let mut iter = self
             .metrics
             .iter()
@@ -240,6 +250,7 @@ impl MetricsSet {
             Some(metric) => metric.value().new_empty(),
         };
 
+        // 将数据累加在一起
         iter.for_each(|metric| accum.aggregate(metric.value()));
 
         Some(accum)
@@ -247,6 +258,7 @@ impl MetricsSet {
 
     /// Returns the sum of all the metrics with the specified name
     /// in the returned set.
+    /// 这些指标是针对某项的  项就用name来表示 所以这里就是找到针对某项的指标值
     pub fn sum_by_name(&self, metric_name: &str) -> Option<MetricValue> {
         self.sum(|m| match m.value() {
             MetricValue::Count { name, .. } => name == metric_name,
@@ -266,6 +278,7 @@ impl MetricsSet {
     /// that had the same name have been
     /// aggregated together. The resulting `MetricsSet` has all
     /// metrics with `Partition=None`
+    /// 相当于压缩  将相同名字的指标合并
     pub fn aggregate_by_name(&self) -> Self {
         let mut map = HashMap::new();
 
@@ -274,10 +287,11 @@ impl MetricsSet {
             let key = metric.value.name();
             map.entry(key)
                 .and_modify(|accum: &mut Metric| {
+                    // 存在时触发该函数  合并数据
                     accum.value_mut().aggregate(metric.value());
                 })
                 .or_insert_with(|| {
-                    // accumulate with no partition
+                    // accumulate with no partition  首次插入  注意这里去掉了分区 那么一开始同名的应该就是不同分区的
                     let partition = None;
                     let mut accum = Metric::new(metric.value().new_empty(), partition);
                     accum.value_mut().aggregate(metric.value());
@@ -296,6 +310,7 @@ impl MetricsSet {
     }
 
     /// Sort the order of metrics so the "most useful" show up first
+    ///
     pub fn sorted_for_display(mut self) -> Self {
         self.metrics
             .sort_unstable_by_key(|metric| metric.value().display_sort_key());
@@ -303,6 +318,7 @@ impl MetricsSet {
     }
 
     /// Remove all timestamp metrics (for more compact display)
+    /// 移除掉时间相关的指标
     pub fn timestamps_removed(self) -> Self {
         let Self { metrics } = self;
 
@@ -343,6 +359,7 @@ impl Display for MetricsSet {
 /// underlying metrics set
 ///
 /// [`ExecutionPlan`]: super::ExecutionPlan
+/// 还是指标集
 #[derive(Default, Debug, Clone)]
 pub struct ExecutionPlanMetricsSet {
     inner: Arc<Mutex<MetricsSet>>,

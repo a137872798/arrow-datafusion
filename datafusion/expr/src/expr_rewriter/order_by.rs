@@ -25,21 +25,23 @@ use datafusion_common::{Column, Result};
 
 /// Rewrite sort on aggregate expressions to sort on the column of aggregate output
 /// For example, `max(x)` is written to `col("MAX(x)")`
-pub fn rewrite_sort_cols_by_aggs(
-    exprs: impl IntoIterator<Item = impl Into<Expr>>,
-    plan: &LogicalPlan,
+=pub fn rewrite_sort_cols_by_aggs(
+    exprs: impl IntoIterator<Item = impl Into<Expr>>,  // 一组排序表达式
+    plan: &LogicalPlan,   // 该计划可以产生结果数据
 ) -> Result<Vec<Expr>> {
     exprs
         .into_iter()
         .map(|e| {
             let expr = e.into();
             match expr {
+                // 仅处理sort类型的表达式
                 Expr::Sort(Sort {
-                    expr,
+                    expr,  // 如果排序基于一个聚合函数结果
                     asc,
                     nulls_first,
                 }) => {
                     let sort = Expr::Sort(Sort::new(
+                        // 改写聚合函数
                         Box::new(rewrite_sort_col_by_aggs(*expr, plan)?),
                         asc,
                         nulls_first,
@@ -56,11 +58,12 @@ fn rewrite_sort_col_by_aggs(expr: Expr, plan: &LogicalPlan) -> Result<Expr> {
     let plan_inputs = plan.inputs();
 
     // Joins, and Unions are not yet handled (should have a projection
-    // on top of them)
+    // on top of them)    只有当逻辑计划长度为1时才处理
     if plan_inputs.len() == 1 {
         let proj_exprs = plan.expressions();
         rewrite_in_terms_of_projection(expr, proj_exprs, plan_inputs[0])
     } else {
+        // 代表join 或者union等需要多个查询结果聚合的情况 不需要改写
         Ok(expr)
     }
 }
@@ -76,15 +79,18 @@ fn rewrite_sort_col_by_aggs(expr: Expr, plan: &LogicalPlan) -> Result<Expr> {
 /// Remember that:
 /// 1. given a projection with exprs: [a, b + c]
 /// 2. t produces an output schema with two columns "a", "b + c"
+/// 根据前面的输出 重写表达式
 fn rewrite_in_terms_of_projection(
-    expr: Expr,
-    proj_exprs: Vec<Expr>,
+    expr: Expr,   // 这个是排序expr  或者说 基于该col进行排序  也有可能是基于一个聚合函数结果进行排序
+    proj_exprs: Vec<Expr>,  // 这个是执行计划的expr
     input: &LogicalPlan,
 ) -> Result<Expr> {
     // assumption is that each item in exprs, such as "b + c" is
     // available as an output column named "b + c"
+    // 处理排序键  内部可能有复杂的表达式
     expr.transform(&|expr| {
         // search for unnormalized names first such as "c1" (such as aliases)
+        // 找到排序列
         if let Some(found) = proj_exprs.iter().find(|a| (**a) == expr) {
             let col = Expr::Column(
                 found
@@ -98,7 +104,7 @@ fn rewrite_in_terms_of_projection(
         // output column -- however first it must be "normalized"
         // (e.g. "c1" --> "t.c1") because that normalization is done
         // at the input of the aggregate.
-
+        // 代表没有匹配的表达式
         let normalized_expr = if let Ok(e) = normalize_col(expr.clone(), input) {
             e
         } else {

@@ -35,9 +35,10 @@ use std::hash::Hash;
 /// The ending frame boundary can be omitted (if the BETWEEN and AND keywords that surround the
 /// starting frame boundary are also omitted), in which case the ending frame boundary defaults to
 /// CURRENT ROW.
+/// 描述一个窗口
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WindowFrame {
-    /// A frame type - either ROWS, RANGE or GROUPS
+    /// A frame type - either ROWS, RANGE or GROUPS    窗口的单位 多行，一个范围，多个组
     pub units: WindowFrameUnits,
     /// A starting frame boundary
     pub start_bound: WindowFrameBound,
@@ -63,9 +64,11 @@ impl TryFrom<ast::WindowFrame> for WindowFrame {
         let start_bound = value.start_bound.try_into()?;
         let end_bound = match value.end_bound {
             Some(value) => value.try_into()?,
+            // end未设置时 默认为CurrentRow
             None => WindowFrameBound::CurrentRow,
         };
 
+        // value值必须要有效
         if let WindowFrameBound::Following(val) = &start_bound {
             if val.is_null() {
                 return Err(DataFusionError::Execution(
@@ -81,6 +84,7 @@ impl TryFrom<ast::WindowFrame> for WindowFrame {
                 ));
             }
         };
+
         Ok(Self {
             units: value.units.into(),
             start_bound,
@@ -91,7 +95,8 @@ impl TryFrom<ast::WindowFrame> for WindowFrame {
 
 impl WindowFrame {
     /// Creates a new, default window frame (with the meaning of default depending on whether the
-    /// frame contains an `ORDER BY` clause.
+    /// frame contains an `ORDER BY` clause.     取决于是否包含一个order by的子句
+    /// has_order_by 是否有排序
     pub fn new(has_order_by: bool) -> Self {
         if has_order_by {
             // This window frame covers the table (or partition if `PARTITION BY` is used)
@@ -106,6 +111,7 @@ impl WindowFrame {
             // This window frame covers the whole table (or partition if `PARTITION BY` is used).
             // It is used when the `OVER` clause does not contain an `ORDER BY` clause and there is
             // no frame.
+            // 此时bound还未设置
             WindowFrame {
                 units: WindowFrameUnits::Rows,
                 start_bound: WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
@@ -117,6 +123,7 @@ impl WindowFrame {
     /// Get reversed window frame. For example
     /// `3 ROWS PRECEDING AND 2 ROWS FOLLOWING` -->
     /// `2 ROWS PRECEDING AND 3 ROWS FOLLOWING`
+    /// 构造一个反向的对象
     pub fn reverse(&self) -> Self {
         let start_bound = match &self.end_bound {
             WindowFrameBound::Preceding(elem) => {
@@ -147,14 +154,13 @@ impl WindowFrame {
 /// Construct equivalent explicit window frames for implicit corner cases.
 /// With this processing, we may assume in downstream code that RANGE/GROUPS
 /// frames contain an appropriate ORDER BY clause.
+/// 规范化处理
 pub fn regularize(mut frame: WindowFrame, order_bys: usize) -> Result<WindowFrame> {
     if frame.units == WindowFrameUnits::Range && order_bys != 1 {
         // Normally, RANGE frames require an ORDER BY clause with exactly one
         // column. However, an ORDER BY clause may be absent in two edge cases.
-        if (frame.start_bound.is_unbounded()
-            || frame.start_bound == WindowFrameBound::CurrentRow)
-            && (frame.end_bound == WindowFrameBound::CurrentRow
-                || frame.end_bound.is_unbounded())
+        if (frame.start_bound.is_unbounded() || frame.start_bound == WindowFrameBound::CurrentRow)
+            && (frame.end_bound == WindowFrameBound::CurrentRow || frame.end_bound.is_unbounded())
         {
             if order_bys == 0 {
                 frame.units = WindowFrameUnits::Rows;
@@ -181,7 +187,7 @@ pub fn regularize(mut frame: WindowFrame, order_bys: usize) -> Result<WindowFram
 /// 3. CURRENT ROW
 /// 4. `<expr>` FOLLOWING
 /// 5. UNBOUNDED FOLLOWING
-///
+/// 代表窗口的一个边界值
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WindowFrameBound {
     /// 1. UNBOUNDED PRECEDING
@@ -196,7 +202,7 @@ pub enum WindowFrameBound {
     /// For RANGE and GROUPS frame types, peers of the current row are also
     /// included in the frame, unless specifically excluded by the EXCLUDE clause.
     /// This is true regardless of whether CURRENT ROW is used as the starting or ending frame
-    /// boundary.
+    /// boundary.   当没有设置下界时 默认使用该值
     CurrentRow,
     /// 4. This is the same as "`<expr>` PRECEDING" except that the boundary is `<expr>` units after the
     /// current rather than before the current row.
@@ -208,6 +214,7 @@ pub enum WindowFrameBound {
 
 impl WindowFrameBound {
     pub fn is_unbounded(&self) -> bool {
+        // 是否是无界的 当前行就是有界的 否则看elem是否为null
         match self {
             WindowFrameBound::Preceding(elem) => elem.is_null(),
             WindowFrameBound::CurrentRow => false,
@@ -234,6 +241,7 @@ impl TryFrom<ast::WindowFrameBound> for WindowFrameBound {
     }
 }
 
+// Preceding/Following有值的情况下 调用该方法
 pub fn convert_frame_bound_to_scalar_value(v: ast::Expr) -> Result<ScalarValue> {
     Ok(ScalarValue::Utf8(Some(match v {
         ast::Expr::Value(ast::Value::Number(value, false))
@@ -287,10 +295,12 @@ impl fmt::Display for WindowFrameBound {
 
 /// There are three frame types: ROWS, GROUPS, and RANGE. The frame type determines how the
 /// starting and ending boundaries of the frame are measured.
+/// 描述窗口单元
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Hash)]
 pub enum WindowFrameUnits {
     /// The ROWS frame type means that the starting and ending boundaries for the frame are
     /// determined by counting individual rows relative to the current row.
+    /// 代表start/end 是基于当前行推断的
     Rows,
     /// The RANGE frame type requires that the ORDER BY clause of the window have exactly one
     /// term. Call that term "X". With the RANGE frame type, the elements of the frame are

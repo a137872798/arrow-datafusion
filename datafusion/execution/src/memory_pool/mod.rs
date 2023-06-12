@@ -27,10 +27,12 @@ pub mod proxy;
 pub use pool::*;
 
 /// The pool of memory on which [`MemoryReservation`] record their memory reservations
+/// 内存池对象
 pub trait MemoryPool: Send + Sync + std::fmt::Debug {
     /// Registers a new [`MemoryConsumer`]
     ///
     /// Note: Subsequent calls to [`Self::grow`] must be made to reserve memory
+    /// 给内存池注册一个内存消费对象
     fn register(&self, _consumer: &MemoryConsumer) {}
 
     /// Records the destruction of a [`MemoryReservation`] with [`MemoryConsumer`]
@@ -41,17 +43,21 @@ pub trait MemoryPool: Send + Sync + std::fmt::Debug {
     /// Infallibly grow the provided `reservation` by `additional` bytes
     ///
     /// This must always succeed
+    /// 内存池扩容
     fn grow(&self, reservation: &MemoryReservation, additional: usize);
 
     /// Infallibly shrink the provided `reservation` by `shrink` bytes
+    /// 内存池缩容
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize);
 
     /// Attempt to grow the provided `reservation` by `additional` bytes
     ///
     /// On error the `allocation` will not be increased in size
+    /// 尝试扩容
     fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> Result<()>;
 
     /// Return the total amount of memory reserved
+    /// 返回此时内存池的容量
     fn reserved(&self) -> usize;
 }
 
@@ -59,6 +65,7 @@ pub trait MemoryPool: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct MemoryConsumer {
     name: String,
+    // 是否允许泄漏？
     can_spill: bool,
 }
 
@@ -72,6 +79,7 @@ impl MemoryConsumer {
     }
 
     /// Set whether this allocation can be spilled to disk
+    /// 设置是否会泄漏
     pub fn with_can_spill(self, can_spill: bool) -> Self {
         Self { can_spill, ..self }
     }
@@ -88,6 +96,7 @@ impl MemoryConsumer {
 
     /// Registers this [`MemoryConsumer`] with the provided [`MemoryPool`] returning
     /// a [`MemoryReservation`] that can be used to grow or shrink the memory reservation
+    /// 将自己注册到内存池上
     pub fn register(self, pool: &Arc<dyn MemoryPool>) -> MemoryReservation {
         pool.register(&self);
         MemoryReservation {
@@ -100,13 +109,16 @@ impl MemoryConsumer {
 
 /// A [`MemoryReservation`] tracks a reservation of memory in a [`MemoryPool`]
 /// that is freed back to the pool on drop
+/// 一个句柄对象
 #[derive(Debug)]
 pub struct MemoryReservation {
     consumer: MemoryConsumer,
+    // 代表此时的内存消耗量
     size: usize,
     policy: Arc<dyn MemoryPool>,
 }
 
+// 方法基本都是委托给 MemoryPool
 impl MemoryReservation {
     /// Returns the size of this reservation in bytes
     pub fn size(&self) -> usize {
@@ -114,6 +126,7 @@ impl MemoryReservation {
     }
 
     /// Frees all bytes from this reservation returning the number of bytes freed
+    /// 本对象被释放时  会归还内存
     pub fn free(&mut self) -> usize {
         let size = self.size;
         if size != 0 {
@@ -127,6 +140,7 @@ impl MemoryReservation {
     /// # Panics
     ///
     /// Panics if `capacity` exceeds [`Self::size`]
+    /// 释放size大小的内存
     pub fn shrink(&mut self, capacity: usize) {
         let new_size = self.size.checked_sub(capacity).unwrap();
         self.policy.shrink(self, capacity);
@@ -137,6 +151,7 @@ impl MemoryReservation {
     pub fn resize(&mut self, capacity: usize) {
         use std::cmp::Ordering;
         match capacity.cmp(&self.size) {
+            // 对内存进行调整 同时影响到pool
             Ordering::Greater => self.grow(capacity - self.size),
             Ordering::Less => self.shrink(self.size - capacity),
             _ => {}
@@ -171,6 +186,7 @@ impl MemoryReservation {
 impl Drop for MemoryReservation {
     fn drop(&mut self) {
         self.free();
+        // 将自身从内存池注销
         self.policy.unregister(&self.consumer);
     }
 }
@@ -233,6 +249,7 @@ impl Default for SharedOptionalMemoryReservation {
     }
 }
 
+// 描述内存分配单位
 const TB: u64 = 1 << 40;
 const GB: u64 = 1 << 30;
 const MB: u64 = 1 << 20;

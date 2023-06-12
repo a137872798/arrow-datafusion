@@ -91,12 +91,12 @@ impl SortMergeJoinExec {
     /// # Error
     /// This function errors when it is not possible to join the left and right sides on keys `on`.
     pub fn try_new(
-        left: Arc<dyn ExecutionPlan>,
-        right: Arc<dyn ExecutionPlan>,
-        on: JoinOn,
-        join_type: JoinType,
-        sort_options: Vec<SortOptions>,
-        null_equals_null: bool,
+        left: Arc<dyn ExecutionPlan>,  // 用于产生左表数据集的计划
+        right: Arc<dyn ExecutionPlan>,  // 用于产生右表数据集的计划
+        on: JoinOn,   // 连接字段
+        join_type: JoinType,  // 连接类型
+        sort_options: Vec<SortOptions>,  // 针对每个连接键使用的排序方式
+        null_equals_null: bool,   // null与null是否相等
     ) -> Result<Self> {
         let left_schema = left.schema();
         let right_schema = right.schema();
@@ -107,6 +107,7 @@ impl SortMergeJoinExec {
             ));
         }
 
+        // 检查join on 的列是否在schema上
         check_join_is_valid(&left_schema, &right_schema, &on)?;
         if sort_options.len() != on.len() {
             return Err(DataFusionError::Plan(format!(
@@ -116,6 +117,7 @@ impl SortMergeJoinExec {
             )));
         }
 
+        // 遍历join on的左右列  以及排序方式
         let (left_sort_exprs, right_sort_exprs): (Vec<_>, Vec<_>) = on
             .iter()
             .zip(sort_options.iter())
@@ -132,7 +134,10 @@ impl SortMergeJoinExec {
             })
             .unzip();
 
+        // 描述执行计划后的输出结果顺序
         let output_ordering = match join_type {
+
+            // 内连接/左连接 都是按照左表的输出顺序
             JoinType::Inner
             | JoinType::Left
             | JoinType::LeftSemi
@@ -142,7 +147,11 @@ impl SortMergeJoinExec {
             JoinType::RightSemi | JoinType::RightAnti => right
                 .output_ordering()
                 .map(|sort_exprs| sort_exprs.to_vec()),
+
+            // 右连接采用的排序方式
             JoinType::Right => {
+
+                // 更新列在schema的下标
                 let left_columns_len = left.schema().fields.len();
                 right
                     .output_ordering()
@@ -176,6 +185,7 @@ impl SortMergeJoinExec {
             JoinType::Full => None,
         };
 
+        // 合并作用2表的schema
         let schema =
             Arc::new(build_join_schema(&left_schema, &right_schema, &join_type).0);
 
@@ -297,11 +307,13 @@ impl ExecutionPlan for SortMergeJoinExec {
         }
     }
 
+    // 执行计划 会触发左右2表数据的join
     fn execute(
         &self,
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        // 左右表的分区数
         let left_partitions = self.left.output_partitioning().partition_count();
         let right_partitions = self.right.output_partitioning().partition_count();
         if left_partitions != right_partitions {
@@ -311,6 +323,7 @@ impl ExecutionPlan for SortMergeJoinExec {
             )));
         }
 
+        // 主表为streamed表  副表为buffered表
         let (streamed, buffered, on_streamed, on_buffered) = match self.join_type {
             JoinType::Inner
             | JoinType::Left
@@ -427,10 +440,10 @@ impl SortMergeJoinMetrics {
     }
 }
 
-/// State of SMJ stream
+/// State of SMJ stream   描述sorted merge状态
 #[derive(Debug, PartialEq, Eq)]
 enum SMJState {
-    /// Init joining with a new streamed row or a new buffered batches
+    /// Init joining with a new streamed row or a new buffered batches  数据流刚创建
     Init,
     /// Polling one streamed row or one buffered batch, or both
     Polling,
@@ -440,7 +453,7 @@ enum SMJState {
     Exhausted,
 }
 
-/// State of streamed data stream
+/// State of streamed data stream   主表的数据流状态   一开始都是INIT
 #[derive(Debug, PartialEq, Eq)]
 enum StreamedState {
     /// Init polling
@@ -453,7 +466,7 @@ enum StreamedState {
     Exhausted,
 }
 
-/// State of buffered data stream
+/// State of buffered data stream   副表的数据流状态
 #[derive(Debug, PartialEq, Eq)]
 enum BufferedState {
     /// Init polling
@@ -641,6 +654,7 @@ impl RecordBatchStream for SMJStream {
 impl Stream for SMJStream {
     type Item = Result<RecordBatch>;
 
+    // 作为数据流  当拉取join数据时 触发该方法
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -650,7 +664,9 @@ impl Stream for SMJStream {
 
         loop {
             match &self.state {
+                // 代表流刚被初始化
                 SMJState::Init => {
+                    // 代表没有数据可读了
                     let streamed_exhausted =
                         self.streamed_state == StreamedState::Exhausted;
                     let buffered_exhausted =
@@ -658,13 +674,16 @@ impl Stream for SMJStream {
                     self.state = if streamed_exhausted && buffered_exhausted {
                         SMJState::Exhausted
                     } else {
+                        // 根据当前记录的排序顺序 决定从哪个流拉取
                         match self.current_ordering {
+                            // 主数据流不够了 需要继续拉取  状态回到init
                             Ordering::Less | Ordering::Equal => {
                                 if !streamed_exhausted {
                                     self.streamed_joined = false;
                                     self.streamed_state = StreamedState::Init;
                                 }
                             }
+                            // 副数据流回到init
                             Ordering::Greater => {
                                 if !buffered_exhausted {
                                     self.buffered_joined = false;
@@ -675,7 +694,11 @@ impl Stream for SMJStream {
                         SMJState::Polling
                     };
                 }
+
+                // 代表此时在等待拉取数据
                 SMJState::Polling => {
+
+                    // 数据未准备好 且还有数据可拉取
                     if ![StreamedState::Exhausted, StreamedState::Ready]
                         .contains(&self.streamed_state)
                     {
@@ -685,6 +708,7 @@ impl Stream for SMJStream {
                         }
                     }
 
+                    //
                     if ![BufferedState::Exhausted, BufferedState::Ready]
                         .contains(&self.buffered_state)
                     {
@@ -735,16 +759,18 @@ impl Stream for SMJStream {
 }
 
 impl SMJStream {
+
+    // 该对象借助sorted merge算法实现连表
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         schema: SchemaRef,
-        sort_options: Vec<SortOptions>,
-        null_equals_null: bool,
-        streamed: SendableRecordBatchStream,
+        sort_options: Vec<SortOptions>,  // 连接键对应的排序方式
+        null_equals_null: bool,  // null是否等于null
+        streamed: SendableRecordBatchStream,  // 左连接则对应左表
         buffered: SendableRecordBatchStream,
-        on_streamed: Vec<Column>,
+        on_streamed: Vec<Column>,  // 左连接则对应左连接键
         on_buffered: Vec<Column>,
-        join_type: JoinType,
+        join_type: JoinType,  // 连接类型
         batch_size: usize,
         join_metrics: SortMergeJoinMetrics,
         reservation: MemoryReservation,
@@ -779,9 +805,11 @@ impl SMJStream {
     }
 
     /// Poll next streamed row
+    /// 拉取主表的数据
     fn poll_streamed_row(&mut self, cx: &mut Context) -> Poll<Option<Result<()>>> {
         loop {
             match &self.streamed_state {
+                // 在拉取前应当处于init状态
                 StreamedState::Init => {
                     if self.streamed_batch.idx + 1 < self.streamed_batch.batch.num_rows()
                     {

@@ -23,6 +23,7 @@ use sqlparser::ast::{Expr as SQLExpr, OrderByExpr, Value};
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     /// convert sql OrderByExpr to Expr::Sort
+    /// 将order by相关的sql-parser表达式  转换成普通表达式
     pub(crate) fn order_by_to_sort_expr(
         &self,
         e: OrderByExpr,
@@ -37,6 +38,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
         let expr = match expr {
             SQLExpr::Value(Value::Number(v, _)) => {
+                // 得到排序列的下标
                 let field_index = v
                     .parse::<usize>()
                     .map_err(|err| DataFusionError::Plan(err.to_string()))?;
@@ -53,9 +55,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     )));
                 }
 
+                // 生成排序列并返回
                 let field = schema.field(field_index - 1);
                 Expr::Column(field.qualified_column())
             }
+            // 可能直接使用column了
             e => self.sql_expr_to_logical_expr(e, schema, planner_context)?,
         };
         Ok({

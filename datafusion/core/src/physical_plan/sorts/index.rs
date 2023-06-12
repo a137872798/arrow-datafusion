@@ -49,6 +49,7 @@
 ///different number of
 ///   RecordBatches
 /// ```
+/// 能够定位第几个流的第几批数据的第几行
 #[derive(Debug, Clone)]
 pub struct RowIndex {
     /// The index of the stream (uniquely identifies the stream)

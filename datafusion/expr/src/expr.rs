@@ -83,15 +83,16 @@ use std::sync::Arc;
 ///   assert_eq!(binary_expr.op, Operator::Eq);
 /// }
 /// ```
+/// 表达式应该就是sql解析后的一个个token吧
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
-    /// An expression with a specific name.
+    /// An expression with a specific name.   应该是col+alias?
     Alias(Box<Expr>, String),
     /// A named reference to a qualified filed in a schema.
     Column(Column),
-    /// A named reference to a variable in a registry.
+    /// A named reference to a variable in a registry.    代表一个在注册表中的变量  名字通过"."拆分并存放在vec<String>中
     ScalarVariable(DataType, Vec<String>),
-    /// A constant value.
+    /// A constant value.   常量
     Literal(ScalarValue),
     /// A binary expression such as "age > 21"
     BinaryExpr(BinaryExpr),
@@ -99,17 +100,20 @@ pub enum Expr {
     Like(Like),
     /// Case-insensitive LIKE expression
     ILike(Like),
-    /// LIKE expression that uses regular expressions
+    /// LIKE expression that uses regular expressions   TODO 不知道啥意思
     SimilarTo(Like),
-    /// Negation of an expression. The expression's type must be a boolean to make sense.
+
+
+    /// 这部分的表达式感觉都差不多
+    /// Negation of an expression. The expression's type must be a boolean to make sense.  将表达式取反
     Not(Box<Expr>),
-    /// Whether an expression is not Null. This expression is never null.
+    /// Whether an expression is not Null. This expression is never null.  代表表达式的结果不为null
     IsNotNull(Box<Expr>),
-    /// Whether an expression is Null. This expression is never null.
+    /// Whether an expression is Null. This expression is never null.  表达式的结果为null
     IsNull(Box<Expr>),
-    /// Whether an expression is True. Boolean operation
+    /// Whether an expression is True. Boolean operation   表达式的结果为true
     IsTrue(Box<Expr>),
-    /// Whether an expression is False. Boolean operation
+    /// Whether an expression is False. Boolean operation   表达式的结果为false
     IsFalse(Box<Expr>),
     /// Whether an expression is Unknown. Boolean operation
     IsUnknown(Box<Expr>),
@@ -121,9 +125,12 @@ pub enum Expr {
     IsNotUnknown(Box<Expr>),
     /// arithmetic negation of an expression, the operand must be of a signed numeric data type
     Negative(Box<Expr>),
+
+
     /// Returns the field of a [`arrow::array::ListArray`] or [`arrow::array::StructArray`] by key
+    /// 代表通过key 检索array的数据
     GetIndexedField(GetIndexedField),
-    /// Whether an expression is between a given range.
+    /// Whether an expression is between a given range.  判断表达式是否在给定的范围内
     Between(Between),
     /// The CASE expression is similar to a series of nested if/else and there are two forms that
     /// can be used. The first form consists of a series of boolean "when" expressions with
@@ -141,7 +148,7 @@ pub enum Expr {
     ///     WHEN value THEN result
     ///     [WHEN ...]
     ///     [ELSE result]
-    /// END
+    /// END      TODO 比较复杂 先搁置
     Case(Case),
     /// Casts the expression to a given type and will return a runtime error if the expression cannot be cast.
     /// This expression is guaranteed to have a fixed type.
@@ -149,27 +156,27 @@ pub enum Expr {
     /// Casts the expression to a given type and will return a null value if the expression cannot be cast.
     /// This expression is guaranteed to have a fixed type.
     TryCast(TryCast),
-    /// A sort expression, that can be used to sort values.
+    /// A sort expression, that can be used to sort values.   对结果排序
     Sort(Sort),
-    /// Represents the call of a built-in scalar function with a set of arguments.
+    /// Represents the call of a built-in scalar function with a set of arguments.   代表使用一组参数调用内建函数
     ScalarFunction {
         /// The function
         fun: built_in_function::BuiltinScalarFunction,
         /// List of expressions to feed to the functions as arguments
         args: Vec<Expr>,
     },
-    /// Represents the call of a user-defined scalar function with arguments.
+    /// Represents the call of a user-defined scalar function with arguments.   使用参数调用用户定义函数
     ScalarUDF {
         /// The function
         fun: Arc<ScalarUDF>,
         /// List of expressions to feed to the functions as arguments
         args: Vec<Expr>,
     },
-    /// Represents the call of an aggregate built-in function with arguments.
+    /// Represents the call of an aggregate built-in function with arguments.    对应一个聚合函数 内部会包含很多expr
     AggregateFunction(AggregateFunction),
-    /// Represents the call of a window function with arguments.
+    /// Represents the call of a window function with arguments.      描述窗口函数以及参数
     WindowFunction(WindowFunction),
-    /// aggregate function
+    /// aggregate function   将聚合函数从内置的替换为用户定义的
     AggregateUDF {
         /// The function
         fun: Arc<AggregateUDF>,
@@ -178,34 +185,34 @@ pub enum Expr {
         /// Optional filter applied prior to aggregating
         filter: Option<Box<Expr>>,
     },
-    /// Returns whether the list contains the expr value.
+    /// Returns whether the list contains the expr value.    判断该值是否被包含在list中
     InList {
-        /// The expression to compare
+        /// The expression to compare     该表达式可以提取参数
         expr: Box<Expr>,
-        /// A list of values to compare against
+        /// A list of values to compare against   需要比对的一组值
         list: Vec<Expr>,
-        /// Whether the expression is negated
+        /// Whether the expression is negated  是否对结果取反
         negated: bool,
     },
     /// EXISTS subquery
     Exists {
-        /// subquery that will produce a single column of data
+        /// subquery that will produce a single column of data  代表一个子查询 内部包含一个逻辑计划
         subquery: Subquery,
-        /// Whether the expression is negated
+        /// Whether the expression is negated  是否对结果取反
         negated: bool,
     },
     /// IN subquery
     InSubquery {
-        /// The expression to compare
+        /// The expression to compare  将子查询结果与该表达式做对比
         expr: Box<Expr>,
         /// subquery that will produce a single column of data to compare against
         subquery: Subquery,
         /// Whether the expression is negated
         negated: bool,
     },
-    /// Scalar subquery
+    /// Scalar subquery   子查询
     ScalarSubquery(Subquery),
-    /// Represents a reference to all fields in a schema.
+    /// Represents a reference to all fields in a schema.   对应 "*" 代表查询所有字段
     Wildcard,
     /// Represents a reference to all fields in a specific schema.
     QualifiedWildcard { qualifier: String },
@@ -213,19 +220,19 @@ pub enum Expr {
     /// GROUP BY expression list
     GroupingSet(GroupingSet),
     /// A place holder for parameters in a prepared statement
-    /// (e.g. `$foo` or `$1`)
+    /// (e.g. `$foo` or `$1`)   代表一个占位符
     Placeholder {
         /// The identifier of the parameter (e.g, $1 or $foo)
         id: String,
-        /// The type the parameter will be filled in with
+        /// The type the parameter will be filled in with   对应占位符的数据类型
         data_type: Option<DataType>,
     },
     /// A place holder which hold a reference to a qualified field
-    /// in the outer query, used for correlated sub queries.
+    /// in the outer query, used for correlated sub queries.  代表对外部列的引用
     OuterReferenceColumn(DataType, Column),
 }
 
-/// Binary expression
+/// Binary expression     代表2部分表达式  左表达式 符号 右表达式  比如 (列 = 变量)
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BinaryExpr {
     /// Left-hand side of the expression
@@ -281,9 +288,9 @@ impl Display for BinaryExpr {
 pub struct Case {
     /// Optional base expression that can be compared to literal values in the "when" expressions
     pub expr: Option<Box<Expr>>,
-    /// One or more when/then expressions
+    /// One or more when/then expressions    多个 when/then表达式
     pub when_then_expr: Vec<(Box<Expr>, Box<Expr>)>,
-    /// Optional "else" expression
+    /// Optional "else" expression   兜底的else表达式
     pub else_expr: Option<Box<Expr>>,
 }
 
@@ -302,12 +309,16 @@ impl Case {
     }
 }
 
-/// LIKE expression
+/// LIKE expression   like表达式
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Like {
+    // 是否对结果取反
     pub negated: bool,
+    // 应该是对应某个列
     pub expr: Box<Expr>,
+    // 应该是对应 %% 的部分
     pub pattern: Box<Expr>,
+    // 转义符
     pub escape_char: Option<char>,
 }
 
@@ -335,6 +346,7 @@ pub struct Between {
     pub expr: Box<Expr>,
     /// Whether the expression is negated
     pub negated: bool,
+    /// 标明上下界
     /// The low end of the range
     pub low: Box<Expr>,
     /// The high end of the range
@@ -356,9 +368,9 @@ impl Between {
 /// Returns the field of a [`arrow::array::ListArray`] or [`arrow::array::StructArray`] by key
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct GetIndexedField {
-    /// the expression to take the field from
+    /// the expression to take the field from  通过表达式产生结果
     pub expr: Box<Expr>,
-    /// The name of the field to take
+    /// The name of the field to take   通过key确定要拿取哪列数据
     pub key: ScalarValue,
 }
 
@@ -372,9 +384,9 @@ impl GetIndexedField {
 /// Cast expression
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Cast {
-    /// The expression being cast
+    /// The expression being cast  通过表达式获取数据
     pub expr: Box<Expr>,
-    /// The `DataType` the expression will yield
+    /// The `DataType` the expression will yield  转换的目标类型
     pub data_type: DataType,
 }
 
@@ -404,7 +416,7 @@ impl TryCast {
 /// SORT expression
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Sort {
-    /// The expression to sort on
+    /// The expression to sort on  排序列
     pub expr: Box<Expr>,
     /// The direction of the sort
     pub asc: bool,
@@ -423,16 +435,16 @@ impl Sort {
     }
 }
 
-/// Aggregate function
+/// Aggregate function   聚合函数
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AggregateFunction {
-    /// Name of the function
+    /// Name of the function   聚合函数是内置的
     pub fun: aggregate_function::AggregateFunction,
-    /// List of expressions to feed to the functions as arguments
+    /// List of expressions to feed to the functions as arguments   每个Expr对应一个参数
     pub args: Vec<Expr>,
-    /// Whether this is a DISTINCT aggregation or not
+    /// Whether this is a DISTINCT aggregation or not   聚合时是否要去重
     pub distinct: bool,
-    /// Optional filter
+    /// Optional filter   追加过滤功能
     pub filter: Option<Box<Expr>>,
 }
 
@@ -455,15 +467,15 @@ impl AggregateFunction {
 /// Window function
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct WindowFunction {
-    /// Name of the function
+    /// Name of the function   窗口函数   也就是描述如何处理窗口内数据的
     pub fun: window_function::WindowFunction,
-    /// List of expressions to feed to the functions as arguments
+    /// List of expressions to feed to the functions as arguments 需要的各种信息 参数也是用expr表示的
     pub args: Vec<Expr>,
-    /// List of partition by expressions
+    /// List of partition by expressions  基于哪几个列进行分区
     pub partition_by: Vec<Expr>,
-    /// List of order by expressions
+    /// List of order by expressions  如何对聚合结果排序
     pub order_by: Vec<Expr>,
-    /// Window frame
+    /// Window frame   描述窗口的单位  上界/下界
     pub window_frame: window_frame::WindowFrame,
 }
 
@@ -493,7 +505,7 @@ impl WindowFunction {
 /// for Apache Spark definition.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum GroupingSet {
-    /// Rollup grouping sets
+    /// Rollup grouping sets   将这组表达式的结果汇总
     Rollup(Vec<Expr>),
     /// Cube grouping sets
     Cube(Vec<Expr>),
@@ -541,7 +553,7 @@ impl PartialOrd for Expr {
 
 impl Expr {
     /// Returns the name of this expression as it should appear in a schema. This name
-    /// will not include any CAST expressions.
+    /// will not include any CAST expressions.  根据不同表达式类型 产生不同的名字
     pub fn display_name(&self) -> Result<String> {
         create_name(self)
     }
@@ -602,6 +614,8 @@ impl Expr {
             Expr::Wildcard => "Wildcard",
         }
     }
+
+    /// 以下方法涉及到 如何将一个表达式与另一个进行组合
 
     /// Return `self == other`
     pub fn eq(self, other: Expr) -> Expr {
@@ -715,6 +729,7 @@ impl Expr {
 
     /// Return `self IN <list>` if `negated` is false, otherwise
     /// return `self NOT IN <list>`.a
+    /// 将该表达式套入一个 in_list中
     pub fn in_list(self, list: Vec<Expr>, negated: bool) -> Expr {
         Expr::InList {
             expr: Box::new(self),
@@ -819,6 +834,7 @@ impl Expr {
 impl Not for Expr {
     type Output = Self;
 
+    // 取反向操作
     fn not(self) -> Self::Output {
         match self {
             Expr::Like(Like {

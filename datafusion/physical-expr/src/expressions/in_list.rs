@@ -45,6 +45,7 @@ use hashbrown::HashMap;
 /// InList
 pub struct InListExpr {
     expr: Arc<dyn PhysicalExpr>,
+    // 一组list每个只能从结果集中抽取出一个值  然后判断expr作用到结果集后的数据与之前的set是否有交集
     list: Vec<Arc<dyn PhysicalExpr>>,
     negated: bool,
     static_filter: Option<Box<dyn Set>>,
@@ -98,7 +99,9 @@ where
     for<'a> &'a T: ArrayAccessor,
     for<'a> <&'a T as ArrayAccessor>::Item: PartialEq + HashValue,
 {
+    // 简单来讲 就是将array中每个元素通过hashmap判断是否存在 并返回结果
     fn contains(&self, v: &dyn Array, negated: bool) -> Result<BooleanArray> {
+        // downcast_dictionary_array宏 会自动处理字典类型
         downcast_dictionary_array! {
             v => {
                 let values_contains = self.contains(v.values().as_ref(), negated)?;
@@ -108,6 +111,7 @@ where
             _ => {}
         }
 
+        // 将array 转换成T类型
         let v = v.as_any().downcast_ref::<T>().unwrap();
         let in_array = &self.array;
         let has_nulls = in_array.null_count() != 0;
@@ -139,6 +143,7 @@ where
 ///
 /// Note: This is split into a separate function as higher-rank trait bounds currently
 /// cause type inference to misbehave
+/// 将某个数组的数据插入到ArrayHashSet中 并且返回ArrayHashSet
 fn make_hash_set<T>(array: T) -> ArrayHashSet
 where
     T: ArrayAccessor,
@@ -151,6 +156,7 @@ where
     let insert_value = |idx| {
         let value = array.value(idx);
         let hash = value.hash_one(&state);
+        // 如果不存在 则插入
         if let RawEntryMut::Vacant(v) = map
             .raw_entry_mut()
             .from_hash(hash, |x| array.value(*x) == value)
@@ -171,6 +177,7 @@ where
 }
 
 /// Creates a `Box<dyn Set>` for the given list of `IN` expressions and `batch`
+/// 将数组填充到一个set中
 fn make_set(array: &dyn Array) -> Result<Box<dyn Set>> {
     Ok(downcast_primitive_array! {
         array => Box::new(ArraySet::new(array, make_hash_set(array))),
@@ -209,8 +216,8 @@ fn make_set(array: &dyn Array) -> Result<Box<dyn Set>> {
 
 /// Evaluates the list of expressions into an array, flattening any dictionaries
 fn evaluate_list(
-    list: &[Arc<dyn PhysicalExpr>],
-    batch: &RecordBatch,
+    list: &[Arc<dyn PhysicalExpr>],  // 表达式可以从数据集中抽取数据
+    batch: &RecordBatch,   // 存储结果的数据集容器
 ) -> Result<ArrayRef> {
     let scalars = list
         .iter()
@@ -221,14 +228,17 @@ fn evaluate_list(
                 )),
                 // Flatten dictionary values
                 ColumnarValue::Scalar(ScalarValue::Dictionary(_, v)) => Ok(*v),
+                // 只允许提取出单个值
                 ColumnarValue::Scalar(s) => Ok(s),
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // 将一组标量转换成 array
     ScalarValue::iter_to_array(scalars)
 }
 
+// 将list转换成过滤器
 fn try_cast_static_filter_to_set(
     list: &[Arc<dyn PhysicalExpr>],
     schema: &Schema,
@@ -245,6 +255,7 @@ impl InListExpr {
         negated: bool,
         schema: &Schema,
     ) -> Self {
+        // 将list转换成一组过滤器
         let static_filter = try_cast_static_filter_to_set(&list, schema).ok();
         Self {
             expr,
@@ -293,6 +304,7 @@ impl PhysicalExpr for InListExpr {
         self
     }
 
+    /// 该计划的作用就是判断结果是否在列表中
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
         Ok(DataType::Boolean)
     }
@@ -302,7 +314,9 @@ impl PhysicalExpr for InListExpr {
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
+        // 结果集先通过内部的物理表达式进行处理
         let value = self.expr.evaluate(batch)?.into_array(1);
+        // 结果通过过滤器后 才能知道某些值存在或者不存在
         let r = match &self.static_filter {
             Some(f) => f.contains(value.as_ref(), self.negated)?,
             None => {
@@ -355,6 +369,7 @@ pub fn in_list(
 ) -> Result<Arc<dyn PhysicalExpr>> {
     // check the data type
     let expr_data_type = expr.data_type(schema)?;
+    // 这里要求 list的处理结果类型需要和expr保持一致
     for list_expr in list.iter() {
         let list_expr_data_type = list_expr.data_type(schema)?;
         if !expr_data_type.eq(&list_expr_data_type) {

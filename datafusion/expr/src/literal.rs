@@ -31,8 +31,9 @@ pub fn lit_timestamp_nano<T: TimestampLiteral>(n: T) -> Expr {
 }
 
 /// Trait for converting a type to a [`Literal`] literal expression.
+/// 描述一个文字
 pub trait Literal {
-    /// convert the value to a Literal expression
+    /// convert the value to a Literal expression  将文字转换成表达式
     fn lit(&self) -> Expr;
 }
 
@@ -41,6 +42,7 @@ pub trait TimestampLiteral {
     fn lit_timestamp_nano(&self) -> Expr;
 }
 
+// 产生常量
 impl Literal for &str {
     fn lit(&self) -> Expr {
         Expr::Literal(ScalarValue::Utf8(Some((*self).to_owned())))
@@ -77,6 +79,7 @@ impl Literal for ScalarValue {
     }
 }
 
+// 为其他类型产生标量
 macro_rules! make_literal {
     ($TYPE:ty, $SCALAR:ident, $DOC: expr) => {
         #[doc = $DOC]

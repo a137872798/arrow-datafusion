@@ -21,6 +21,8 @@ use datafusion_expr::{lit, Expr};
 use sqlparser::ast::{Expr as SQLExpr, UnaryOperator, Value};
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 对表达式进行一元操作
     pub(crate) fn parse_sql_unary_op(
         &self,
         op: UnaryOperator,

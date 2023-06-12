@@ -51,6 +51,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// Window execution plan
+/// 该窗口函数使用的内存不可控
 #[derive(Debug)]
 pub struct WindowAggExec {
     /// Input plan
@@ -71,16 +72,19 @@ pub struct WindowAggExec {
 }
 
 impl WindowAggExec {
+
     /// Create a new execution plan for window aggregates
     pub fn try_new(
-        window_expr: Vec<Arc<dyn WindowExpr>>,
+        window_expr: Vec<Arc<dyn WindowExpr>>,   // 使用同一排序键的窗口表达式
         input: Arc<dyn ExecutionPlan>,
         input_schema: SchemaRef,
-        partition_keys: Vec<Arc<dyn PhysicalExpr>>,
+        partition_keys: Vec<Arc<dyn PhysicalExpr>>,  // 使用的分区键
     ) -> Result<Self> {
+        // 输入的schema 加上窗口函数产生的field 合成新的schema
         let schema = create_schema(&input_schema, &window_expr)?;
         let schema = Arc::new(schema);
 
+        // 内部plan排序键 到外部window分区键的映射
         let ordered_partition_by_indices =
             get_ordered_partition_by_indices(window_expr[0].partition_by(), &input);
         Ok(Self {
@@ -114,9 +118,12 @@ impl WindowAggExec {
     // We are sure that partition by columns are always at the beginning of sort_keys
     // Hence returned `PhysicalSortExpr` corresponding to `PARTITION BY` columns can be used safely
     // to calculate partition separation points
+    // 可以得到外部window的分区键
     pub fn partition_by_sort_keys(&self) -> Result<Vec<PhysicalSortExpr>> {
         // Partition by sort keys indices are stored in self.ordered_partition_by_indices.
+        // 代表内部表达式 的排序键
         let sort_keys = self.input.output_ordering().unwrap_or(&[]);
+        // ordered_partition_by_indices是内部排序键 到外部window分区键的下标  那么作用到sort_keys上 自然就变成了 window的分区键
         get_at_indices(sort_keys, &self.ordered_partition_by_indices)
     }
 }
@@ -136,6 +143,7 @@ impl ExecutionPlan for WindowAggExec {
     }
 
     /// Get the output partitioning of this plan
+    /// 分区基于内部的plan
     fn output_partitioning(&self) -> Partitioning {
         // because we can have repartitioning using the partition keys
         // this would be either 1 or more than 1 depending on the presense of
@@ -157,6 +165,7 @@ impl ExecutionPlan for WindowAggExec {
         }
     }
 
+    // 产生的数据结果顺序 由内部plan决定
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         self.input().output_ordering()
     }
@@ -165,12 +174,16 @@ impl ExecutionPlan for WindowAggExec {
         vec![true]
     }
 
+    // 获取期望的排序顺序  完全不知道这个方法是干嘛的
     fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
+        // 获取窗口函数的分区键和顺序键
         let partition_bys = self.window_expr()[0].partition_by();
         let order_keys = self.window_expr()[0].order_by();
+        // 代表input的排序键 能够转换成的分区键的数量
         if self.ordered_partition_by_indices.len() < partition_bys.len() {
             vec![calc_requirements(partition_bys, order_keys)]
         } else {
+            // 按照顺序对分区键重新排序
             let partition_bys = self
                 .ordered_partition_by_indices
                 .iter()
@@ -179,10 +192,12 @@ impl ExecutionPlan for WindowAggExec {
         }
     }
 
+    // 是否需要分区
     fn required_input_distribution(&self) -> Vec<Distribution> {
         if self.partition_keys.is_empty() {
             vec![Distribution::SinglePartition]
         } else {
+            // 代表基于分区键 进行分区
             vec![Distribution::HashPartitioned(self.partition_keys.clone())]
         }
     }
@@ -191,6 +206,7 @@ impl ExecutionPlan for WindowAggExec {
         self.input().equivalence_properties()
     }
 
+    // 替换内部的数据源 (plan)
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -203,12 +219,16 @@ impl ExecutionPlan for WindowAggExec {
         )?))
     }
 
+    // 执行计划
     fn execute(
         &self,
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        // 内部plan产生基础数据
         let input = self.input.execute(partition, context)?;
+
+        // 对stream做一层包装
         let stream = Box::pin(WindowAggStream::new(
             self.schema.clone(),
             self.window_expr.clone(),
@@ -250,6 +270,7 @@ impl ExecutionPlan for WindowAggExec {
         Some(self.metrics.clone_inner())
     }
 
+    // 返回统计i结果
     fn statistics(&self) -> Statistics {
         let input_stat = self.input.statistics();
         let win_cols = self.window_expr.len();
@@ -261,6 +282,8 @@ impl ExecutionPlan for WindowAggExec {
         } else {
             column_statistics.extend(vec![ColumnStatistics::default(); input_cols]);
         }
+
+        // 针对窗口函数产生的field  初始化统计对象
         column_statistics.extend(vec![ColumnStatistics::default(); win_cols]);
         Statistics {
             is_exact: input_stat.is_exact,
@@ -271,6 +294,7 @@ impl ExecutionPlan for WindowAggExec {
     }
 }
 
+// 将window产生的field 追加到schema上
 fn create_schema(
     input_schema: &Schema,
     window_expr: &[Arc<dyn WindowExpr>],
@@ -286,6 +310,7 @@ fn create_schema(
 }
 
 /// Compute the window aggregate columns
+/// 每个分区 被多个窗口函数作用后的结果
 fn compute_window_aggregates(
     window_expr: &[Arc<dyn WindowExpr>],
     batch: &RecordBatch,
@@ -296,10 +321,12 @@ fn compute_window_aggregates(
         .collect()
 }
 
-/// stream for window aggregation plan
+/// stream for window aggregation plan   将内部的数据流用window包装
 pub struct WindowAggStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
+
+    // 暂存此时拉取到的全部数据
     batches: Vec<RecordBatch>,
     finished: bool,
     window_expr: Vec<Arc<dyn WindowExpr>>,
@@ -315,8 +342,8 @@ impl WindowAggStream {
         window_expr: Vec<Arc<dyn WindowExpr>>,
         input: SendableRecordBatchStream,
         baseline_metrics: BaselineMetrics,
-        partition_by_sort_keys: Vec<PhysicalSortExpr>,
-        ordered_partition_by_indices: Vec<usize>,
+        partition_by_sort_keys: Vec<PhysicalSortExpr>,  // window分区键
+        ordered_partition_by_indices: Vec<usize>,  // 内部plan的排序键 通过这些下标提取出来的列就是window分区键
     ) -> Result<Self> {
         // In WindowAggExec all partition by columns should be ordered.
         if window_expr[0].partition_by().len() != ordered_partition_by_indices.len() {
@@ -336,25 +363,33 @@ impl WindowAggStream {
         })
     }
 
+    // 处理每批拉取到的数据
     fn compute_aggregates(&self) -> Result<RecordBatch> {
-        // record compute time on drop
+        // record compute time on drop  记录开始处理时间
         let _timer = self.baseline_metrics.elapsed_compute().timer();
+
+        // 将此前暂存的batch数据 合并成一个recordBatch
         let batch = concat_batches(&self.input.schema(), &self.batches)?;
+        // 没有数据需要处理返回空结果
         if batch.num_rows() == 0 {
             return Ok(RecordBatch::new_empty(self.schema.clone()));
         }
 
+        // 将window的分区键 又转换成内部plan的排序键
         let partition_by_sort_keys = self
             .ordered_partition_by_indices
             .iter()
             .map(|idx| self.partition_by_sort_keys[*idx].evaluate_to_sort_column(&batch))
             .collect::<Result<Vec<_>>>()?;
+
+        // 将记录按行分成多个分区
         let partition_points =
             evaluate_partition_ranges(batch.num_rows(), &partition_by_sort_keys)?;
 
         let mut partition_results = vec![];
-        // Calculate window cols
+        // Calculate window cols  计算每个分区的结果
         for partition_point in partition_points {
+            // 得到每个分区的长度
             let length = partition_point.end - partition_point.start;
             partition_results.push(compute_window_aggregates(
                 &self.window_expr,
@@ -372,7 +407,7 @@ impl WindowAggStream {
         // note the setup of window aggregates is that they newly calculated window
         // expression results are always appended to the columns
         let mut batch_columns = batch.columns().to_vec();
-        // calculate window cols
+        // calculate window cols   窗口函数的每个列会合并到产生的结果上 作为新的结果
         batch_columns.extend_from_slice(&columns);
         Ok(RecordBatch::try_new(self.schema.clone(), batch_columns)?)
     }
@@ -385,12 +420,15 @@ impl Stream for WindowAggStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        // 调用该方法 触发数据拉取行为  并基于窗口函数产生结果列
         let poll = self.poll_next_inner(cx);
         self.baseline_metrics.record_poll(poll)
     }
 }
 
 impl WindowAggStream {
+
+    // 拉取数据
     #[inline]
     fn poll_next_inner(
         &mut self,
@@ -401,6 +439,7 @@ impl WindowAggStream {
         }
 
         loop {
+            // 从下游对象获取数据
             let result = match ready!(self.input.poll_next_unpin(cx)) {
                 Some(Ok(batch)) => {
                     self.batches.push(batch);

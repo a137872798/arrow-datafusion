@@ -33,7 +33,7 @@ use datafusion_expr::ColumnarValue;
 /// IS NOT NULL expression
 #[derive(Debug)]
 pub struct IsNotNullExpr {
-    /// The input expression
+    /// The input expression   在该表达式产生的结果之后 判断是否为空
     arg: Arc<dyn PhysicalExpr>,
 }
 

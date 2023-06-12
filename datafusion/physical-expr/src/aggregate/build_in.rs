@@ -35,26 +35,31 @@ use std::sync::Arc;
 
 /// Create a physical aggregation expression.
 /// This function errors when `input_phy_exprs`' can't be coerced to a valid argument type of the aggregation function.
+/// 将逻辑表达式的聚合函数  包装成物理聚合expr
 pub fn create_aggregate_expr(
-    fun: &AggregateFunction,
-    distinct: bool,
-    input_phy_exprs: &[Arc<dyn PhysicalExpr>],
-    input_schema: &Schema,
-    name: impl Into<String>,
+    fun: &AggregateFunction,   // 枚举中包含了此时支持的所有聚合函数
+    distinct: bool,   // 代表是否要去重
+    input_phy_exprs: &[Arc<dyn PhysicalExpr>],   // 聚合函数的参数
+    input_schema: &Schema,  // 输入数据的元数据
+    name: impl Into<String>,   // 物理聚合函数的名称
 ) -> Result<Arc<dyn AggregateExpr>> {
     let name = name.into();
-    // get the result data type for this aggregate function
+    // get the result data type for this aggregate function   获取参数类型
     let input_phy_types = input_phy_exprs
         .iter()
         .map(|e| e.data_type(input_schema))
         .collect::<Result<Vec<_>>>()?;
+
+    // 根据聚合函数类型 + 参数类型 可以推断出结果类型
     let rt_type = return_type(fun, &input_phy_types)?;
     let input_phy_exprs = input_phy_exprs.to_vec();
 
+    // 下面就是根据fun返回对应的聚合函数
     Ok(match (fun, distinct) {
         (AggregateFunction::Count, false) => Arc::new(
             expressions::Count::new_with_multiple_exprs(input_phy_exprs, name, rt_type),
         ),
+        // 简单理解就是相同的值 不会再被纳入计数    同时相同的值只针对列  所以DistinctCount不支持行累加器 必须要针对某个列的数据使用
         (AggregateFunction::Count, true) => Arc::new(expressions::DistinctCount::new(
             input_phy_types[0].clone(),
             input_phy_exprs[0].clone(),

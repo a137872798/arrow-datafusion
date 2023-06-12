@@ -25,11 +25,12 @@ use std::{
 use datafusion_common::{config::ConfigOptions, Result, ScalarValue};
 
 /// Configuration options for Execution context
+/// 执行过程中上下文配置
 #[derive(Clone)]
 pub struct SessionConfig {
-    /// Configuration options
+    /// Configuration options   各种选项
     options: ConfigOptions,
-    /// Opaque extensions.
+    /// Opaque extensions.    可以存储任意数据的容器
     extensions: AnyMap,
 }
 
@@ -83,6 +84,8 @@ impl SessionConfig {
     pub fn set_str(self, key: &str, value: &str) -> Self {
         self.set(key, ScalarValue::Utf8(Some(value.to_string())))
     }
+
+    /// 以下是各种get/set
 
     /// Customize batch size
     pub fn with_batch_size(mut self, n: usize) -> Self {

@@ -44,7 +44,7 @@ use datafusion_physical_expr::normalize_out_expr_with_alias_schema;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 
-/// Execution plan for a projection
+/// Execution plan for a projection   投影的物理计划
 #[derive(Debug)]
 pub struct ProjectionExec {
     /// The projection expressions stored as tuples of (expression, output column name)
@@ -65,19 +65,22 @@ pub struct ProjectionExec {
 impl ProjectionExec {
     /// Create a projection on an input
     pub fn try_new(
-        expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
-        input: Arc<dyn ExecutionPlan>,
+        expr: Vec<(Arc<dyn PhysicalExpr>, String)>,  // 需要保留的列 同时可能会赋予一层别名
+        input: Arc<dyn ExecutionPlan>,  // 用于产生结果集的物理计划
     ) -> Result<Self> {
         let input_schema = input.schema();
 
         let fields: Result<Vec<Field>> = expr
             .iter()
             .map(|(e, name)| {
+
+                // 生成新的列
                 let mut field = Field::new(
                     name,
                     e.data_type(&input_schema)?,
                     e.nullable(&input_schema)?,
                 );
+                // 关联 field级别的元数据
                 field.set_metadata(
                     get_field_metadata(e, &input_schema).unwrap_or_default(),
                 );
@@ -86,14 +89,17 @@ impl ProjectionExec {
             })
             .collect();
 
+        // 根据投影列 生成新的schema
         let schema = Arc::new(Schema::new_with_metadata(
             fields?,
             input_schema.metadata().clone(),
         ));
 
+        // 产生别名容器 内部plan往外部plan映射
         let mut alias_map: HashMap<Column, Vec<Column>> = HashMap::new();
         for (expression, name) in expr.iter() {
             if let Some(column) = expression.as_any().downcast_ref::<Column>() {
+                // 找到新列的下标
                 let new_col_idx = schema.index_of(name)?;
                 // When the column name is the same, but index does not equal, treat it as Alias
                 if (column.name() != name) || (column.index() != new_col_idx) {
@@ -107,6 +113,7 @@ impl ProjectionExec {
         let child_output_ordering = input.output_ordering();
         let output_ordering = match child_output_ordering {
             Some(sort_exprs) => {
+                // 替换成别名
                 let normalized_exprs = sort_exprs
                     .iter()
                     .map(|sort_expr| {
@@ -171,7 +178,7 @@ impl ExecutionPlan for ProjectionExec {
 
     /// Get the output partitioning of this plan
     fn output_partitioning(&self) -> Partitioning {
-        // Output partition need to respect the alias
+        // Output partition need to respect the alias  替换成别名
         let input_partition = self.input.output_partitioning();
         match input_partition {
             Partitioning::Hash(exprs, part) => {
@@ -283,6 +290,7 @@ impl ExecutionPlan for ProjectionExec {
 
 /// If e is a direct column reference, returns the field level
 /// metadata for that field, if any. Otherwise returns None
+/// 获取该列相关的元数据
 fn get_field_metadata(
     e: &Arc<dyn PhysicalExpr>,
     input_schema: &Schema,
@@ -327,9 +335,13 @@ fn stats_projection(
 }
 
 impl ProjectionStream {
+
+    // 通过该方法处理收到的数据集
     fn batch_project(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         // records time on drop
         let _timer = self.baseline_metrics.elapsed_compute().timer();
+
+        // 只抽取需要的列
         let arrays = self
             .expr
             .iter()

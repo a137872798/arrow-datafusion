@@ -26,13 +26,13 @@ use datafusion_expr::Accumulator;
 use std::any::Any;
 use std::sync::Arc;
 
-/// MEDIAN aggregate expression
+/// MEDIAN aggregate expression   中位数
 #[derive(Debug)]
 pub struct ApproxMedian {
     name: String,
     expr: Arc<dyn PhysicalExpr>,
     data_type: DataType,
-    approx_percentile: ApproxPercentileCont,
+    approx_percentile: ApproxPercentileCont,  // 通过t-digest算法
 }
 
 impl ApproxMedian {
@@ -43,6 +43,8 @@ impl ApproxMedian {
         data_type: DataType,
     ) -> Result<Self> {
         let name: String = name.into();
+
+        // 这里就是声明百分比为 0.5
         let approx_percentile = ApproxPercentileCont::new(
             vec![expr.clone(), lit(0.5_f64)],
             name.clone(),

@@ -104,7 +104,7 @@ impl UnionExec {
     /// otherwise, an error will be returned.
     pub fn try_new_with_schema(
         inputs: Vec<Arc<dyn ExecutionPlan>>,
-        schema: DFSchemaRef,
+        schema: DFSchemaRef,  // 使用给定的schema进行初始化
     ) -> Result<Self> {
         let mut exec = Self::new(inputs);
         let exec_schema = exec.schema();

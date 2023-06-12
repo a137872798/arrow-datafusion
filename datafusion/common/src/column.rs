@@ -28,7 +28,7 @@ use std::sync::Arc;
 /// A named reference to a qualified field in a schema.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Column {
-    /// relation/table reference.
+    /// relation/table reference.   标明该列属于哪个表
     pub relation: Option<OwnedTableReference>,
     /// field/column name.
     pub name: String,
@@ -67,11 +67,12 @@ impl Column {
         }
     }
 
-    /// Deserialize a fully qualified name string into a column
+    /// Deserialize a fully qualified name string into a column   通过限定名初始化 限定名会携带表信息
     pub fn from_qualified_name(flat_name: impl Into<String>) -> Self {
         let flat_name = flat_name.into();
         let mut idents = parse_identifiers_normalized(&flat_name);
 
+        // 果然将名字拆解成多段
         let (relation, name) = match idents.len() {
             1 => (None, idents.remove(0)),
             2 => (
@@ -105,6 +106,7 @@ impl Column {
     /// Serialize column into a flat name string
     pub fn flat_name(&self) -> String {
         match &self.relation {
+            // 表+列
             Some(r) => format!("{}.{}", r, self.name),
             None => self.name.clone(),
         }
@@ -149,20 +151,26 @@ impl Column {
     )]
     pub fn normalize_with_schemas(
         self,
-        schemas: &[&Arc<DFSchema>],
-        using_columns: &[HashSet<Column>],
+        schemas: &[&Arc<DFSchema>],  // 从相关的schema中提取出relation信息
+        using_columns: &[HashSet<Column>],  // 当命中多个字段的时候 如果所有field都包含在using_columns中 也认为是正常现象
     ) -> Result<Self> {
+
+        // 如果已经设置了列相关的表  就不需要处理了
         if self.relation.is_some() {
             return Ok(self);
         }
 
         for schema in schemas {
+            // 尝试从这些schema中找到该列信息
             let fields = schema.fields_with_unqualified_name(&self.name);
             match fields.len() {
+                // 代表该schema中没有该列信息
                 0 => continue,
                 1 => {
                     return Ok(fields[0].qualified_column());
                 }
+
+                // 出现了多个同名列 只有出现关联查询的时候才可能
                 _ => {
                     // More than 1 fields in this schema have their names set to self.name.
                     //
@@ -245,14 +253,16 @@ impl Column {
             return Ok(self);
         }
 
+        // 判断的逻辑和上面是一样的
         for schema_level in schemas {
+            // 每次从一个schema中找到该col同名的field
             let fields = schema_level
                 .iter()
                 .flat_map(|s| s.fields_with_unqualified_name(&self.name))
                 .collect::<Vec<_>>();
             match fields.len() {
-                0 => continue,
-                1 => return Ok(fields[0].qualified_column()),
+                0 => continue,  // 在该schema中没有找到field 继续下一个
+                1 => return Ok(fields[0].qualified_column()),  // 找到了匹配的field
                 _ => {
                     // More than 1 fields in this schema have their names set to self.name.
                     //
@@ -267,11 +277,12 @@ impl Column {
                     // We will use the relation from the first matched field to normalize self.
 
                     // Compare matched fields with one USING JOIN clause at a time
+                    // 所有字段均出现过
                     for using_col in using_columns {
                         let all_matched = fields
                             .iter()
                             .all(|f| using_col.contains(&f.qualified_column()));
-                        // All matched fields belong to the same using column set, in orther words
+                        // All matched fields belong to the same using column set, in other words
                         // the same join clause. We simply pick the qualifer from the first match.
                         if all_matched {
                             return Ok(fields[0].qualified_column());

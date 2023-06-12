@@ -31,13 +31,15 @@ use crate::LogicalPlan;
 /// While DataFusion does not offer support transactions, it provides
 /// [`LogicalPlan`](crate::LogicalPlan) support to assist building
 /// database systems using DataFusion
+/// 代表一个会话
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Statement {
-    // Begin a transaction
+    /// 分别代表事务头和事务尾
+    /// Begin a transaction
     TransactionStart(TransactionStart),
-    // Commit or rollback a transaction
+    /// Commit or rollback a transaction
     TransactionEnd(TransactionEnd),
-    /// Set a Variable
+    /// Set a Variable   设置值
     SetVariable(SetVariable),
 }
 
@@ -98,19 +100,20 @@ impl Statement {
 }
 
 /// The operator that modifies the content of a database (adapted from
-/// substrait WriteRel)
+/// substrait WriteRel)      为什么要区别 dml会话 和普通会话 ?  事务和dml操作不冲突吧
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DmlStatement {
-    /// The table name
+    /// The table name   会话针对的表 如果有子查询呢
     pub table_name: OwnedTableReference,
-    /// The schema of the table (must align with Rel input)
+    /// The schema of the table (must align with Rel input)   表结构
     pub table_schema: DFSchemaRef,
     /// The type of operation to perform
     pub op: WriteOp,
-    /// The relation that determines the tuples to add/remove/modify the schema must match with table_schema
+    /// The relation that determines the tuples to add/remove/modify the schema must match with table_schema  一个会话对应一个逻辑计划
     pub input: Arc<LogicalPlan>,
 }
 
+/// DML 增删改  不包含查询
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum WriteOp {
     Insert,
@@ -130,21 +133,21 @@ impl Display for WriteOp {
     }
 }
 
-/// Indicates if a transaction was committed or aborted
+/// Indicates if a transaction was committed or aborted   结论 或者说结果
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum TransactionConclusion {
     Commit,
     Rollback,
 }
 
-/// Indicates if this transaction is allowed to write
+/// Indicates if this transaction is allowed to write  只读事务/读写事务
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum TransactionAccessMode {
     ReadOnly,
     ReadWrite,
 }
 
-/// Indicates ANSI transaction isolation level
+/// Indicates ANSI transaction isolation level   事务隔离级别
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum TransactionIsolationLevel {
     ReadUncommitted,
@@ -154,34 +157,36 @@ pub enum TransactionIsolationLevel {
 }
 
 /// Indicator that the following statements should be committed or rolled back atomically
+/// 代表接下来的会话应该自动提交或者回滚
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TransactionStart {
     /// indicates if transaction is allowed to write
     pub access_mode: TransactionAccessMode,
-    // indicates ANSI isolation level
+    /// indicates ANSI isolation level
     pub isolation_level: TransactionIsolationLevel,
     /// Empty schema
     pub schema: DFSchemaRef,
 }
 
 /// Indicator that any current transaction should be terminated
+/// 对应一个事务的提交或回滚
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TransactionEnd {
     /// whether the transaction committed or aborted
     pub conclusion: TransactionConclusion,
-    /// if specified a new transaction is immediately started with same characteristics
+    /// if specified a new transaction is immediately started with same characteristics  代表会立即开启相同的事务
     pub chain: bool,
     /// Empty schema
     pub schema: DFSchemaRef,
 }
 
 /// Set a Variable's value -- value in
-/// [`ConfigOptions`](datafusion_common::config::ConfigOptions)
+/// [`ConfigOptions`](datafusion_common::config::ConfigOptions)  给某个变量设置值
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SetVariable {
-    /// The variable name
+    /// The variable name   变量名
     pub variable: String,
-    /// The value to set
+    /// The value to set    变量值
     pub value: String,
     /// Dummy schema
     pub schema: DFSchemaRef,

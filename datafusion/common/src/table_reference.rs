@@ -19,6 +19,7 @@ use crate::utils::{parse_identifiers_normalized, quote_identifier};
 use std::borrow::Cow;
 
 /// A resolved path to a table of the form "catalog.schema.table"
+/// 就是描述某个表的 catalog.schema.table 信息
 #[derive(Debug, Clone)]
 pub struct ResolvedTableReference<'a> {
     /// The catalog (aka database) containing the table
@@ -67,6 +68,7 @@ impl<'a> std::fmt::Display for ResolvedTableReference<'a> {
 /// let table_reference = TableReference::from("MySchema.MyTable");
 /// assert_eq!(table_reference, TableReference::partial("myschema", "mytable"));
 ///```
+/// 用于引用一个表 然后不同枚举可以理解为详细程度
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TableReference<'a> {
     /// An unqualified table reference, e.g. "table"
@@ -298,6 +300,7 @@ impl<'a> TableReference<'a> {
 
     /// Forms a [`TableReference`] by parsing `s` as a multipart SQL
     /// identifier. See docs on [`TableReference`] for more details.
+    /// 解析字符串 产生表信息
     pub fn parse_str(s: &'a str) -> Self {
         let mut parts = parse_identifiers_normalized(s);
 

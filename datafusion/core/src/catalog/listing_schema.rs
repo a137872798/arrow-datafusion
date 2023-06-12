@@ -45,6 +45,7 @@ use std::sync::{Arc, Mutex};
 /// assuming it contains valid deltalake data, i.e:
 /// s3://host.example.com:3000/data/tpch/customer/part-00000-xxxx.snappy.parquet
 /// s3://host.example.com:3000/data/tpch/customer/_delta_log/
+/// 借助外部系统提供schema信息
 pub struct ListingSchemaProvider {
     authority: String,
     path: object_store::path::Path,
@@ -68,8 +69,8 @@ impl ListingSchemaProvider {
     pub fn new(
         authority: String,
         path: object_store::path::Path,
-        factory: Arc<dyn TableProviderFactory>,
-        store: Arc<dyn ObjectStore>,
+        factory: Arc<dyn TableProviderFactory>,  // 创建表使用的工厂
+        store: Arc<dyn ObjectStore>,   // 存储数据的仓库
         format: String,
         has_header: bool,
     ) -> Self {
@@ -85,7 +86,9 @@ impl ListingSchemaProvider {
     }
 
     /// Reload table information from ObjectStore
+    /// 从ObjectStore 上同步表数据
     pub async fn refresh(&self, state: &SessionState) -> datafusion_common::Result<()> {
+        // 找到ObjectStore指定路径下的数据
         let entries: Vec<_> = self
             .store
             .list(Some(&self.path))
@@ -125,16 +128,19 @@ impl ListingSchemaProvider {
                 DataFusionError::Internal("Cannot parse file name!".to_string())
             })?;
 
+            // 代表本地还没有同步该表数据
             if !self.table_exist(table_name) {
                 let table_url = format!("{}/{}", self.authority, table_path);
 
                 let name = OwnedTableReference::bare(table_name.to_string());
+
+                // 当发现了之前不存在的表后 触发创建逻辑
                 let provider = self
                     .factory
                     .create(
                         state,
                         &CreateExternalTable {
-                            schema: Arc::new(DFSchema::empty()),
+                            schema: Arc::new(DFSchema::empty()),  // 注意这样的schema为空
                             name,
                             location: table_url,
                             file_type: self.format.clone(),
@@ -149,6 +155,8 @@ impl ListingSchemaProvider {
                         },
                     )
                     .await?;
+
+                // 注册表
                 let _ = self.register_table(table_name.to_string(), provider.clone())?;
             }
         }
@@ -179,6 +187,7 @@ impl SchemaProvider for ListingSchemaProvider {
             .cloned()
     }
 
+    // 将表添加到容器中
     fn register_table(
         &self,
         name: String,

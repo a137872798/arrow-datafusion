@@ -22,10 +22,10 @@ use arrow::datatypes::SchemaRef;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-/// Equivalence Properties is a vec of EquivalentClass.
+/// Equivalence Properties is a vec of EquivalentClass.   用于判断是否相等
 #[derive(Debug, Clone)]
 pub struct EquivalenceProperties {
-    classes: Vec<EquivalentClass>,
+    classes: Vec<EquivalentClass>,   // 这组class的信息决定了如何判断相等
     schema: SchemaRef,
 }
 
@@ -45,8 +45,10 @@ impl EquivalenceProperties {
         self.schema.clone()
     }
 
+    // 追加一组class
     pub fn extend<I: IntoIterator<Item = EquivalentClass>>(&mut self, iter: I) {
         for ec in iter {
+            // 要求该class下的col 与本对象的schema相同
             for column in ec.iter() {
                 assert_eq!(column.name(), self.schema.fields()[column.index()].name());
             }
@@ -56,7 +58,9 @@ impl EquivalenceProperties {
 
     /// Add new equal conditions into the EquivalenceProperties, the new equal conditions are usually comming from the
     /// equality predicates in Join or Filter
+    /// 添加一个相等的条件
     pub fn add_equal_conditions(&mut self, new_conditions: (&Column, &Column)) {
+        // 确保column 与schema是匹配的
         assert_eq!(
             new_conditions.0.name(),
             self.schema.fields()[new_conditions.0.index()].name()
@@ -146,6 +150,7 @@ impl EquivalentClass {
         self.others.insert(col)
     }
 
+    // 移除无效的列
     pub fn remove(&mut self, col: &Column) -> bool {
         let removed = self.others.remove(col);
         if !removed && *col == self.head {
@@ -180,41 +185,49 @@ impl EquivalentClass {
 ///    For example:  Projection(a, a as a1, a as a2)
 /// 2) Truncate the EquivalentClasses that are not in the output schema
 pub fn project_equivalence_properties(
-    input_eq: EquivalenceProperties,
-    alias_map: &HashMap<Column, Vec<Column>>,
-    output_eq: &mut EquivalenceProperties,
+    input_eq: EquivalenceProperties,   // 原表示相等的prop
+    alias_map: &HashMap<Column, Vec<Column>>,   // 别名映射  旧col可以找到新col
+    output_eq: &mut EquivalenceProperties,  // 基于新的schema生成的相等prop 此时里面还没有col信息
 ) {
     let mut ec_classes = input_eq.classes().to_vec();
     for (column, columns) in alias_map {
         let mut find_match = false;
         for class in ec_classes.iter_mut() {
+            // 代表这些class会受到影响
             if class.contains(column) {
                 for col in columns {
+                    // 把别名col添加到class.other中   相当于是更新操作
                     class.insert(col.clone());
                 }
                 find_match = true;
                 break;
             }
         }
+        // 没找到的话就将 alias map 中的col 添加进去
         if !find_match {
             ec_classes.push(EquivalentClass::new(column.clone(), columns.clone()));
         }
     }
 
+    // 这里找到要移除的col
     let schema = output_eq.schema();
     for class in ec_classes.iter_mut() {
         let mut columns_to_remove = vec![];
         for column in class.iter() {
+            // 代表这些col已经过时了
             if column.index() >= schema.fields().len()
                 || schema.fields()[column.index()].name() != column.name()
             {
                 columns_to_remove.push(column.clone());
             }
         }
+        // 移除掉无效的列
         for column in columns_to_remove {
             class.remove(&column);
         }
     }
+
+    // 确保剩余的class内有有效col
     ec_classes.retain(|props| props.len() > 1);
     output_eq.extend(ec_classes);
 }

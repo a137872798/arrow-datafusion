@@ -39,18 +39,18 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// APPROX_DISTINCT aggregate expression
+/// APPROX_DISTINCT aggregate expression 近似的统计不重复的数据有多少 正好对应了HLL
 #[derive(Debug)]
 pub struct ApproxDistinct {
-    name: String,
-    input_data_type: DataType,
+    name: String,   // 聚合后的字段名
+    input_data_type: DataType, // 接收的数据类型
     expr: Arc<dyn PhysicalExpr>,
 }
 
 impl ApproxDistinct {
     /// Create a new ApproxDistinct aggregate function.
     pub fn new(
-        expr: Arc<dyn PhysicalExpr>,
+        expr: Arc<dyn PhysicalExpr>,   // 初始化都需要表达式 但是整个聚合逻辑又用不上
         name: impl Into<String>,
         input_data_type: DataType,
     ) -> Self {
@@ -68,6 +68,7 @@ impl AggregateExpr for ApproxDistinct {
         self
     }
 
+    // 聚合后的结果是一个 Int64类型的值  必然不为null
     fn field(&self) -> Result<Field> {
         Ok(Field::new(&self.name, DataType::UInt64, false))
     }
@@ -84,6 +85,7 @@ impl AggregateExpr for ApproxDistinct {
         vec![self.expr.clone()]
     }
 
+    // 产生累加器
     fn create_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         let accumulator: Box<dyn Accumulator> = match &self.input_data_type {
             // TODO u8, i8, u16, i16 shall really be done using bitmap, not HLL
@@ -238,6 +240,7 @@ macro_rules! default_accumulator_impl {
                         "Impossibly got empty binary array from states".into(),
                     )
                 })?;
+                // 将state转换成 hll 进行合并
                 let other = v.try_into()?;
                 self.hll.merge(&other);
             }
@@ -249,6 +252,7 @@ macro_rules! default_accumulator_impl {
             Ok(vec![value])
         }
 
+        // 返回不重复的数量
         fn evaluate(&self) -> Result<ScalarValue> {
             Ok(ScalarValue::UInt64(Some(self.hll.count() as u64)))
         }
@@ -267,7 +271,7 @@ where
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         let array: &GenericBinaryArray<T> =
             downcast_value!(values[0], GenericBinaryArray, T);
-        // flatten because we would skip nulls
+        // flatten because we would skip nulls   将数据填充到hll中
         self.hll
             .extend(array.into_iter().flatten().map(|v| v.to_vec()));
         Ok(())

@@ -39,12 +39,13 @@ use crate::expressions::format_state_name;
 
 /// COUNT aggregate expression
 /// Returns the amount of non-null values of the given expression.
+/// 在解析sql产生名为 Count的逻辑表达式后   在转换成物理表达式时 会转换成该对象  该对象实现了AggregateExpr特征
 #[derive(Debug, Clone)]
 pub struct Count {
     name: String,
     data_type: DataType,
     nullable: bool,
-    exprs: Vec<Arc<dyn PhysicalExpr>>,
+    exprs: Vec<Arc<dyn PhysicalExpr>>,   // 内部有一组表达式
 }
 
 impl Count {
@@ -63,8 +64,8 @@ impl Count {
     }
 
     pub fn new_with_multiple_exprs(
-        exprs: Vec<Arc<dyn PhysicalExpr>>,
-        name: impl Into<String>,
+        exprs: Vec<Arc<dyn PhysicalExpr>>,   // 对应参数
+        name: impl Into<String>,    // 表达式名称
         data_type: DataType,
     ) -> Self {
         Self {
@@ -78,10 +79,12 @@ impl Count {
 
 /// count null values for multiple columns
 /// for each row if one column value is null, then null_count + 1
+/// 数一共有多少null值
 fn null_count_for_multiple_cols(values: &[ArrayRef]) -> usize {
     if values.len() > 1 {
         let result_bool_buf: Option<BooleanBuffer> = values
             .iter()
+            // 遍历列
             .map(|a| a.nulls())
             .fold(None, |acc, b| match (acc, b) {
                 (Some(acc), Some(b)) => Some(acc.bitand(b.inner())),
@@ -185,16 +188,20 @@ impl CountAccumulator {
 }
 
 impl Accumulator for CountAccumulator {
+
+    // 累加器的状态 可以通过加载state还原上次的累加状态
     fn state(&self) -> Result<Vec<ScalarValue>> {
         Ok(vec![ScalarValue::Int64(Some(self.count))])
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         let array = &values[0];
+        // 减去null 剩下的就是有效值
         self.count += (array.len() - null_count_for_multiple_cols(values)) as i64;
         Ok(())
     }
 
+    // update的逆操作
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         let array = &values[0];
         self.count -= (array.len() - null_count_for_multiple_cols(values)) as i64;

@@ -20,12 +20,15 @@ use datafusion_common::{DataFusionError, Result};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// 各种类型内存池
+
 /// A [`MemoryPool`] that enforces no limit
 #[derive(Debug, Default)]
 pub struct UnboundedMemoryPool {
     used: AtomicUsize,
 }
 
+/// 无限制内存池 只需要计数就可以了
 impl MemoryPool for UnboundedMemoryPool {
     fn grow(&self, _reservation: &MemoryReservation, additional: usize) {
         self.used.fetch_add(additional, Ordering::Relaxed);
@@ -48,6 +51,7 @@ impl MemoryPool for UnboundedMemoryPool {
 /// A [`MemoryPool`] that implements a greedy first-come first-serve limit
 #[derive(Debug)]
 pub struct GreedyMemoryPool {
+    // 先给一个初始大小
     pool_size: usize,
     used: AtomicUsize,
 }
@@ -112,6 +116,8 @@ pub struct FairSpillPool {
 
 #[derive(Debug)]
 struct FairSpillPoolState {
+    // 根据注册的消费者类型 影响不同的计数值   注册的是不可泄漏对象 申请的就是不可泄漏内存  注册的是可泄漏对象 申请的就是可泄漏内存
+
     /// The number of consumers that can spill
     num_spill: usize,
 
@@ -151,6 +157,7 @@ impl MemoryPool for FairSpillPool {
 
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
         let mut state = self.state.lock();
+        // 判断申请内存的是否是可泄漏对象
         match reservation.consumer.can_spill {
             true => state.spillable += additional,
             false => state.unspillable += additional,
@@ -165,19 +172,23 @@ impl MemoryPool for FairSpillPool {
         }
     }
 
+    // 总的pool_size是不变的
     fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> Result<()> {
         let mut state = self.state.lock();
 
         match reservation.consumer.can_spill {
             true => {
                 // The total amount of memory available to spilling consumers
+                // 剩下的是free + spill_available
                 let spill_available = self.pool_size.saturating_sub(state.unspillable);
 
                 // No spiller may use more than their fraction of the memory available
+                // 平均下来是每个consumer允许使用的内存量
                 let available = spill_available
                     .checked_div(state.num_spill)
                     .unwrap_or(spill_available);
 
+                // 超范围了 不允许
                 if reservation.size + additional > available {
                     return Err(insufficient_capacity_err(
                         reservation,
@@ -188,10 +199,12 @@ impl MemoryPool for FairSpillPool {
                 state.spillable += additional;
             }
             false => {
+                // 这是剩下的内存
                 let available = self
                     .pool_size
                     .saturating_sub(state.unspillable + state.spillable);
 
+                // 小于本次申请的  不可以
                 if available < additional {
                     return Err(insufficient_capacity_err(
                         reservation,

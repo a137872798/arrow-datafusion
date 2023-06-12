@@ -83,6 +83,7 @@ impl AggregateExpr for DistinctCount {
 
     fn create_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         Ok(Box::new(DistinctCountAccumulator {
+            // 通过set来去重
             values: HashSet::default(),
             state_data_type: self.state_data_type.clone(),
         }))
@@ -141,6 +142,8 @@ impl DistinctCountAccumulator {
 }
 
 impl Accumulator for DistinctCountAccumulator {
+
+    // 还原状态 需要保留set   同时set的len 就是count
     fn state(&self) -> Result<Vec<ScalarValue>> {
         let mut cols_out =
             ScalarValue::new_list(Some(Vec::new()), self.state_data_type.clone());
@@ -158,6 +161,7 @@ impl Accumulator for DistinctCountAccumulator {
         if values.is_empty() {
             return Ok(());
         }
+
         let arr = &values[0];
         (0..arr.len()).try_for_each(|index| {
             if !arr.is_null(index) {

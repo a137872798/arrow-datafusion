@@ -124,6 +124,7 @@ use super::options::{
 /// DataFilePaths adds a method to convert strings and vector of strings to vector of [`ListingTableUrl`] URLs.
 /// This allows methods such [`SessionContext::read_csv`] and `[`SessionContext::read_avro`]
 /// to take either a single file or multiple files.
+/// 将str, Vec<str> 转换成ListingTableUrl
 pub trait DataFilePaths {
     /// Parse to a vector of [`ListingTableUrl`] URLs.
     fn to_urls(self) -> Result<Vec<ListingTableUrl>>;
@@ -199,13 +200,14 @@ where
 /// # Ok(())
 /// # }
 /// ```
+/// 会话上下文
 #[derive(Clone)]
 pub struct SessionContext {
-    /// UUID for the session
+    /// UUID for the session   每个会话会被分配一个UUID
     session_id: String,
-    /// Session start time
+    /// Session start time   会话开始时间
     session_start_time: DateTime<Utc>,
-    /// Shared session state for the session
+    /// Shared session state for the session  维护会话中各种各样的东西 小到options 大到内存池
     state: Arc<RwLock<SessionState>>,
 }
 
@@ -222,17 +224,23 @@ impl SessionContext {
     }
 
     /// Finds any [`ListingSchemaProvider`]s and instructs them to reload tables from "disk"
+    /// 刷新目录下的信息
     pub async fn refresh_catalogs(&self) -> Result<()> {
+        // 获取此时所有目录
         let cat_names = self.catalog_names().clone();
         for cat_name in cat_names.iter() {
             let cat = self.catalog(cat_name.as_str()).ok_or_else(|| {
                 DataFusionError::Internal("Catalog not found!".to_string())
             })?;
+
+            // 遍历目录的schema
             for schema_name in cat.schema_names() {
                 let schema = cat.schema(schema_name.as_str()).ok_or_else(|| {
                     DataFusionError::Internal("Schema not found!".to_string())
                 })?;
                 let lister = schema.as_any().downcast_ref::<ListingSchemaProvider>();
+                // 触发刷新  因为表数据来自于 ObjectStore 所以需要进行同步
+                // 根据ObjectStore的信息会在ListingSchemaProvider中产生table   对应的类型为ListingSchemaProvider
                 if let Some(lister) = lister {
                     lister.refresh(&self.state()).await?;
                 }
@@ -268,12 +276,15 @@ impl SessionContext {
     }
 
     /// Registers the [`RecordBatch`] as the specified table name
+    /// 基于一组数据产生内存表
     pub fn register_batch(
         &self,
         table_name: &str,
         batch: RecordBatch,
     ) -> Result<Option<Arc<dyn TableProvider>>> {
+        // vec![vec![batch]] 代表默认单分区
         let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
+        // 注册表
         self.register_table(
             TableReference::Bare {
                 table: table_name.into(),
@@ -294,6 +305,7 @@ impl SessionContext {
 
     /// Return the [`TableProviderFactory`] that is registered for the
     /// specified file type, if any.
+    /// 通过文件类型 找到对应的ListingFactory  可以借助工厂对象创建外部表句柄
     pub fn table_factory(
         &self,
         file_type: &str,
@@ -302,6 +314,7 @@ impl SessionContext {
     }
 
     /// Return the `enable_ident_normalization` of this Session
+    /// 代表会对符号进行标准化处理
     pub fn enable_ident_normalization(&self) -> bool {
         self.state
             .read()
@@ -311,7 +324,7 @@ impl SessionContext {
             .enable_ident_normalization
     }
 
-    /// Return a copied version of config for this Session
+    /// Return a copied version of config for this Session  返回整个会话中使用的配置副本
     pub fn copied_config(&self) -> SessionConfig {
         self.state.read().config.clone()
     }
@@ -325,36 +338,42 @@ impl SessionContext {
     /// If this is not desirable, consider using [`SessionState::create_logical_plan()`] which
     /// does not mutate the state based on such statements.
     pub async fn sql(&self, sql: &str) -> Result<DataFrame> {
-        // create a query planner
+        // create a query planner  解析sql后转换成会话
         let plan = self.state().create_logical_plan(sql).await?;
-
+        // 执行计划 得到数据快
         self.execute_logical_plan(plan).await
     }
 
     /// Execute the [`LogicalPlan`], return a [`DataFrame`]
     pub async fn execute_logical_plan(&self, plan: LogicalPlan) -> Result<DataFrame> {
+
         match plan {
             LogicalPlan::Dml(DmlStatement {
                 table_name,
-                op: WriteOp::Insert,
+                op: WriteOp::Insert,  // 对应insert语句
                 input,
                 ..
             }) => {
+                // 判断要插入的目标表 是否有出现在本地仓库中
                 if self.table_exist(&table_name)? {
                     let name = table_name.table();
                     let provider = self.table_provider(name).await?;
+                    // 调用insert_into
                     provider.insert_into(&self.state(), &input).await?;
                 } else {
                     return Err(DataFusionError::Execution(format!(
                         "Table '{table_name}' does not exist"
                     )));
                 }
+                // 返回的dataframe中 包含一个空的logicalPlan
                 self.return_empty_dataframe()
             }
+            // 创建表 并加入到本地仓库中
             LogicalPlan::CreateExternalTable(cmd) => {
                 self.create_external_table(&cmd).await
             }
 
+            // 创建内存表
             LogicalPlan::CreateMemoryTable(CreateMemoryTable {
                 name,
                 input,
@@ -370,24 +389,32 @@ impl SessionContext {
                 }
 
                 let input = Arc::try_unwrap(input).unwrap_or_else(|e| e.as_ref().clone());
+                // 检测这个表是否可用
                 let table = self.table(&name).await;
 
                 match (if_not_exists, or_replace, table) {
+                    // 表已经存在
                     (true, false, Ok(_)) => self.return_empty_dataframe(),
+
+                    // 代表替换存在的表
                     (false, true, Ok(_)) => {
                         self.deregister_table(&name)?;
                         let schema = Arc::new(input.schema().as_ref().into());
                         let physical = DataFrame::new(self.state(), input);
 
+                        // 这里会执行计划 并将产生的结果分区
                         let batches: Vec<_> = physical.collect_partitioned().await?;
                         let table = Arc::new(MemTable::try_new(schema, batches)?);
 
                         self.register_table(&name, table)?;
+                        // 最后也是返回空的dataframe
                         self.return_empty_dataframe()
                     }
                     (true, true, Ok(_)) => Err(DataFusionError::Execution(
                         "'IF NOT EXISTS' cannot coexist with 'REPLACE'".to_string(),
                     )),
+
+                    // 之前不存在 进行创建
                     (_, _, Err(_)) => {
                         let schema = Arc::new(input.schema().as_ref().into());
                         let physical = DataFrame::new(self.state(), input);
@@ -404,16 +431,19 @@ impl SessionContext {
                 }
             }
 
+            // 创建视图
             LogicalPlan::CreateView(CreateView {
                 name,
                 input,
                 or_replace,
                 definition,
             }) => {
+                // 主要是检测view是否可用
                 let view = self.table(&name).await;
 
                 match (or_replace, view) {
                     (true, Ok(_)) => {
+                        // 已经存在视图的情况下 进行替换
                         self.deregister_table(&name)?;
                         let table =
                             Arc::new(ViewTable::try_new((*input).clone(), definition)?);
@@ -421,6 +451,7 @@ impl SessionContext {
                         self.register_table(&name, table)?;
                         self.return_empty_dataframe()
                     }
+                    // view不可用 生成并注册
                     (_, Err(_)) => {
                         let table =
                             Arc::new(ViewTable::try_new((*input).clone(), definition)?);
@@ -434,6 +465,7 @@ impl SessionContext {
                 }
             }
 
+            // 删除表
             LogicalPlan::DropTable(DropTable {
                 name, if_exists, ..
             }) => {
@@ -447,6 +479,7 @@ impl SessionContext {
                 }
             }
 
+            // 删除视图
             LogicalPlan::DropView(DropView {
                 name, if_exists, ..
             }) => {
@@ -460,6 +493,7 @@ impl SessionContext {
                 }
             }
 
+            // 设置参数的plan
             LogicalPlan::Statement(Statement::SetVariable(SetVariable {
                 variable,
                 value,
@@ -472,10 +506,12 @@ impl SessionContext {
                 self.return_empty_dataframe()
             }
 
+            // 获取表的描述信息
             LogicalPlan::DescribeTable(DescribeTable { schema, .. }) => {
                 self.return_describe_table_dataframe(schema).await
             }
 
+            // 产生一个schema
             LogicalPlan::CreateCatalogSchema(CreateCatalogSchema {
                 schema_name,
                 if_not_exists,
@@ -483,8 +519,10 @@ impl SessionContext {
             }) => {
                 // sqlparser doesnt accept database / catalog as parameter to CREATE SCHEMA
                 // so for now, we default to default catalog
+                // 在没有指定catalog时  使用默认值
                 let tokens: Vec<&str> = schema_name.split('.').collect();
                 let (catalog, schema_name) = match tokens.len() {
+
                     1 => {
                         let state = self.state.read();
                         let name = &state.config.options().catalog.default_catalog;
@@ -514,7 +552,9 @@ impl SessionContext {
                 let schema = catalog.schema(schema_name);
 
                 match (if_not_exists, schema) {
+                    // schema已经存在
                     (true, Some(_)) => self.return_empty_dataframe(),
+                    // 生成schema并注册
                     (true, None) | (false, None) => {
                         let schema = Arc::new(MemorySchemaProvider::new());
                         catalog.register_schema(schema_name, schema)?;
@@ -525,6 +565,8 @@ impl SessionContext {
                     ))),
                 }
             }
+
+            // 创建catalog
             LogicalPlan::CreateCatalog(CreateCatalog {
                 catalog_name,
                 if_not_exists,
@@ -535,6 +577,7 @@ impl SessionContext {
                 match (if_not_exists, catalog) {
                     (true, Some(_)) => self.return_empty_dataframe(),
                     (true, None) | (false, None) => {
+                        // 跟上面一样的套路
                         let new_catalog = Arc::new(MemoryCatalogProvider::new());
                         self.state
                             .write()
@@ -548,6 +591,7 @@ impl SessionContext {
                 }
             }
 
+            // 其余情况直接返回  注意以上的情况还不包含update/scan
             plan => Ok(DataFrame::new(self.state(), plan)),
         }
     }
@@ -558,7 +602,7 @@ impl SessionContext {
         Ok(DataFrame::new(self.state(), plan))
     }
 
-    // return an record_batch which describe table
+    // return an record_batch which describe table  将表的描述信息以RecordBatch的方式展示
     async fn return_describe_table_record_batch(
         &self,
         schema: Arc<Schema>,
@@ -597,6 +641,7 @@ impl SessionContext {
     }
 
     // return an dataframe which describe file
+    // 返回描述表schema的信息
     async fn return_describe_table_dataframe(
         &self,
         schema: Arc<Schema>,
@@ -605,6 +650,7 @@ impl SessionContext {
         self.read_batch(record_batch)
     }
 
+    // 创建一个外部表
     async fn create_external_table(
         &self,
         cmd: &CreateExternalTable,
@@ -612,6 +658,7 @@ impl SessionContext {
         let exist = self.table_exist(&cmd.name)?;
         if exist {
             match cmd.if_not_exists {
+                // 表已经存在
                 true => return self.return_empty_dataframe(),
                 false => {
                     return Err(DataFusionError::Execution(format!(
@@ -624,16 +671,19 @@ impl SessionContext {
 
         let table_provider: Arc<dyn TableProvider> =
             self.create_custom_table(cmd).await?;
+        // 追加到对应schema中
         self.register_table(&cmd.name, table_provider)?;
         self.return_empty_dataframe()
     }
 
+    // 根据参数创建表
     async fn create_custom_table(
         &self,
         cmd: &CreateExternalTable,
     ) -> Result<Arc<dyn TableProvider>> {
         let state = self.state.read().clone();
         let file_type = cmd.file_type.to_uppercase();
+        // 拿到文件类型相关的表工厂
         let factory =
             &state
                 .table_factories
@@ -644,10 +694,12 @@ impl SessionContext {
                         cmd.file_type
                     ))
                 })?;
+        // 创建表
         let table = (*factory).create(&state, cmd).await?;
         Ok(table)
     }
 
+    // 找到表并删除
     async fn find_and_deregister<'a>(
         &self,
         table_ref: impl Into<TableReference<'a>>,
@@ -666,6 +718,7 @@ impl SessionContext {
 
         if let Some(schema) = maybe_schema {
             if let Some(table_provider) = schema.table(&table).await {
+                // 找到后 匹配table_type
                 if table_provider.table_type() == table_type {
                     schema.deregister_table(&table)?;
                     return Ok(true);
@@ -677,6 +730,7 @@ impl SessionContext {
     }
 
     /// Registers a variable provider within this context.
+    /// 追加参数
     pub fn register_variable(
         &self,
         variable_type: VarType,
@@ -695,6 +749,7 @@ impl SessionContext {
     ///
     /// `SELECT MY_FUNC(x)...` will look for a function named `"my_func"`
     /// `SELECT "my_FUNC"(x)` will look for a function named `"my_FUNC"`
+    /// 注册用户定义函数
     pub fn register_udf(&self, f: ScalarUDF) {
         self.state
             .write()
@@ -720,6 +775,7 @@ impl SessionContext {
     ///
     /// For more control such as reading multiple files, you can use
     /// [`read_table`](Self::read_table) with a [`ListingTable`].
+    /// 根据path找到表  并包装成dataframe
     async fn _read_type<'a, P: DataFilePaths>(
         &self,
         table_paths: P,
@@ -728,6 +784,8 @@ impl SessionContext {
         let table_paths = table_paths.to_urls()?;
         let session_config = self.copied_config();
         let listing_options = options.to_listing_options(&session_config);
+
+        // 根据路径对应的文件数据 推断出schema
         let resolved_schema = options
             .get_resolved_schema(&session_config, self.state(), table_paths[0].clone())
             .await?;
@@ -735,6 +793,7 @@ impl SessionContext {
             .with_listing_options(listing_options)
             .with_schema(resolved_schema);
         let provider = ListingTable::try_new(config)?;
+        // 生成一个scan执行计划  包装成dataFrame
         self.read_table(Arc::new(provider))
     }
 
@@ -827,10 +886,12 @@ impl SessionContext {
     }
 
     /// Creates a [`DataFrame`] for reading a [`RecordBatch`]
+    /// 将数据包装成 DataFrame
     pub fn read_batch(&self, batch: RecordBatch) -> Result<DataFrame> {
         let provider = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
         Ok(DataFrame::new(
             self.state(),
+            // 产生内存表 这样执行scan计划的时候就能得到结果啦
             LogicalPlanBuilder::scan(
                 UNNAMED_TABLE,
                 provider_as_source(Arc::new(provider)),
@@ -866,6 +927,8 @@ impl SessionContext {
                 ))
             }
         };
+
+        // 对于ListingTable 在初始化时不需要数据集  访问数据时应该时借助path找到数据文件
         let config = ListingTableConfig::new(table_path)
             .with_listing_options(options)
             .with_schema(resolved_schema);
@@ -989,16 +1052,20 @@ impl SessionContext {
     ///
     /// Returns the [`TableProvider`] previously registered for this
     /// reference, if any
+    /// 在当前上下文环境中增加表
     pub fn register_table<'a>(
         &'a self,
         table_ref: impl Into<TableReference<'a>>,
         provider: Arc<dyn TableProvider>,
     ) -> Result<Option<Arc<dyn TableProvider>>> {
         let table_ref = table_ref.into();
+        // 获取全限定名
         let table = table_ref.table().to_owned();
         self.state
             .read()
+            // 根据tableref 找到对应的schema
             .schema_for_ref(table_ref)?
+            // InformationSchemaProvider 不支持注册新表
             .register_table(table, provider)
     }
 
@@ -1014,6 +1081,7 @@ impl SessionContext {
         self.state
             .read()
             .schema_for_ref(table_ref)?
+            // InformationSchemaProvider 不支持添加或删除表   然后其他schema就是移除了某个table的信息
             .deregister_table(&table)
     }
 
@@ -1043,7 +1111,9 @@ impl SessionContext {
         table_ref: impl Into<TableReference<'a>>,
     ) -> Result<DataFrame> {
         let table_ref = table_ref.into();
+        // 找到表
         let provider = self.table_provider(table_ref.to_owned_reference()).await?;
+        // 生成一个查询表数据的plan
         let plan = LogicalPlanBuilder::scan(
             table_ref.to_owned_reference(),
             provider_as_source(Arc::clone(&provider)),
@@ -1054,6 +1124,7 @@ impl SessionContext {
     }
 
     /// Return a [`TableProvider`] for the specified table.
+    /// 根据ref查找表
     pub async fn table_provider<'a>(
         &self,
         table_ref: impl Into<TableReference<'a>>,
@@ -1126,6 +1197,7 @@ impl SessionContext {
     }
 
     /// Executes a query and writes the results to a partitioned Parquet file.
+    /// 逻辑计划无法直接执行  需要转换成ExecutionPlan后执行
     pub async fn write_parquet(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -1144,6 +1216,7 @@ impl SessionContext {
     /// `query_execution_start_time` to the current time
     pub fn state(&self) -> SessionState {
         let mut state = self.state.read().clone();
+        // 将starttime 更新成当前时间
         state.execution_props.start_execution();
         state
     }
@@ -1190,6 +1263,7 @@ struct DefaultQueryPlanner {}
 #[async_trait]
 impl QueryPlanner for DefaultQueryPlanner {
     /// Given a `LogicalPlan`, create an `ExecutionPlan` suitable for execution
+    /// 基于逻辑计划生成物理计划
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
@@ -1203,27 +1277,28 @@ impl QueryPlanner for DefaultQueryPlanner {
 }
 
 /// Execution context for registering data sources and executing queries
+/// 会话状态 包含了各种执行会话需要的组件
 #[derive(Clone)]
 pub struct SessionState {
     /// UUID for the session
     session_id: String,
-    /// Responsible for analyzing and rewrite a logical plan before optimization
+    /// Responsible for analyzing and rewrite a logical plan before optimization   用于分析和重写执行计划 (重写是为了之后的优化)
     analyzer: Analyzer,
-    /// Responsible for optimizing a logical plan
+    /// Responsible for optimizing a logical plan   用于优化逻辑计划
     optimizer: Optimizer,
-    /// Responsible for optimizing a physical execution plan
+    /// Responsible for optimizing a physical execution plan   优化物理执行计划 跟上面的逻辑计划是不一样的
     physical_optimizers: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
-    /// Responsible for planning `LogicalPlan`s, and `ExecutionPlan`
+    /// Responsible for planning `LogicalPlan`s, and `ExecutionPlan`  接收逻辑计划 转换成物理计划
     query_planner: Arc<dyn QueryPlanner + Send + Sync>,
-    /// Collection of catalogs containing schemas and ultimately TableProviders
+    /// Collection of catalogs containing schemas and ultimately TableProviders  通过该对象拿到物理表 通过适配器的方式可以把自定义的table传进来 比如greptime
     catalog_list: Arc<dyn CatalogList>,
-    /// Scalar functions that are registered with the context
+    /// Scalar functions that are registered with the context  当前会话中能使用的一些用户自定义的标量函数
     scalar_functions: HashMap<String, Arc<ScalarUDF>>,
-    /// Aggregate functions registered in the context
+    /// Aggregate functions registered in the context    用户定义的聚合函数
     aggregate_functions: HashMap<String, Arc<AggregateUDF>>,
-    /// Session configuration
+    /// Session configuration  涉及整个过程中的各种配置
     config: SessionConfig,
-    /// Execution properties
+    /// Execution properties  执行相关的属性
     execution_props: ExecutionProps,
     /// TableProviderFactories for different file formats.
     ///
@@ -1232,8 +1307,10 @@ pub struct SessionState {
     /// This is used to create [`TableProvider`] instances for the
     /// `CREATE EXTERNAL TABLE ... STORED AS <FORMAT>` for custom file
     /// formats other than those built into DataFusion
+    /// 表工厂 支持多种方式产生表
     table_factories: HashMap<String, Arc<dyn TableProviderFactory>>,
     /// Runtime environment
+    /// 描述一些环境信息 比如内存/磁盘
     runtime_env: Arc<RuntimeEnv>,
 }
 
@@ -1254,11 +1331,13 @@ pub fn default_session_builder(config: SessionConfig) -> SessionState {
 impl SessionState {
     /// Returns new SessionState using the provided configuration and runtime
     pub fn with_config_rt(config: SessionConfig, runtime: Arc<RuntimeEnv>) -> Self {
+        // 默认情况下 数据库列表是在内存实现的
         let catalog_list = Arc::new(MemoryCatalogList::new()) as Arc<dyn CatalogList>;
         Self::with_config_rt_and_catalog_list(config, runtime, catalog_list)
     }
 
     /// Returns new SessionState using the provided configuration, runtime and catalog list.
+    /// 这3个要素构成了 SessionState
     pub fn with_config_rt_and_catalog_list(
         config: SessionConfig,
         runtime: Arc<RuntimeEnv>,
@@ -1267,6 +1346,7 @@ impl SessionState {
         let session_id = Uuid::new_v4().to_string();
 
         // Create table_factories for all default formats
+        // 每种文件格式 对应一个factories
         let mut table_factories: HashMap<String, Arc<dyn TableProviderFactory>> =
             HashMap::new();
         table_factories.insert("PARQUET".into(), Arc::new(ListingTableFactory::new()));
@@ -1275,6 +1355,7 @@ impl SessionState {
         table_factories.insert("NDJSON".into(), Arc::new(ListingTableFactory::new()));
         table_factories.insert("AVRO".into(), Arc::new(ListingTableFactory::new()));
 
+        // 代表需要创建默认catalog/schema
         if config.create_default_catalog_and_schema() {
             let default_catalog = MemoryCatalogProvider::new();
 
@@ -1285,6 +1366,7 @@ impl SessionState {
                 )
                 .expect("memory catalog provider can register schema");
 
+            // 注册默认schema
             Self::register_default_schema(
                 &config,
                 &table_factories,
@@ -1292,6 +1374,7 @@ impl SessionState {
                 &default_catalog,
             );
 
+            // 注册默认catalog
             catalog_list.register_catalog(
                 config.options().catalog.default_catalog.clone(),
                 Arc::new(default_catalog),
@@ -1299,6 +1382,7 @@ impl SessionState {
         }
 
         // We need to take care of the rule ordering. They may influence each other.
+        // 插入一组执行计划优化器
         let physical_optimizers: Vec<Arc<dyn PhysicalOptimizerRule + Sync + Send>> = vec![
             Arc::new(AggregateStatistics::new()),
             // Statistics-based join selection will change the Auto mode to a real join implementation,
@@ -1353,6 +1437,7 @@ impl SessionState {
             analyzer: Analyzer::new(),
             optimizer: Optimizer::new(),
             physical_optimizers,
+            // 该对象可以用逻辑计划生成物理计划
             query_planner: Arc::new(DefaultQueryPlanner {}),
             catalog_list,
             scalar_functions: HashMap::new(),
@@ -1364,12 +1449,15 @@ impl SessionState {
         }
     }
 
+    // 注册默认schema
     fn register_default_schema(
         config: &SessionConfig,
         table_factories: &HashMap<String, Arc<dyn TableProviderFactory>>,
         runtime: &Arc<RuntimeEnv>,
-        default_catalog: &MemoryCatalogProvider,
+        default_catalog: &MemoryCatalogProvider,  // 此时default_catalog中包含默认schema
     ) {
+
+        // location/format 都是针对默认schema的配置   表示从哪里加载数据
         let url = config.options().catalog.location.as_ref();
         let format = config.options().catalog.format.as_ref();
         let (url, format) = match (url, format) {
@@ -1387,16 +1475,21 @@ impl SessionState {
         };
         let path = &url.as_str()[authority.len()..];
         let path = object_store::path::Path::parse(path).expect("Can't parse path");
+        // 解析得到objectStore
         let store = ObjectStoreUrl::parse(authority.as_str())
             .expect("Invalid default catalog url");
         let store = match runtime.object_store(store) {
             Ok(store) => store,
             _ => return,
         };
+
+        // 找到文件格式对应的工厂
         let factory = match table_factories.get(format.as_str()) {
             Some(factory) => factory,
             _ => return,
         };
+
+        // ListingSchemaProvider类型的对象可以加载ObjectStore的数据 并同步到本地
         let schema = ListingSchemaProvider::new(
             authority,
             path,
@@ -1420,17 +1513,21 @@ impl SessionState {
             .resolve(&catalog.default_catalog, &catalog.default_schema)
     }
 
+    // 通过table-ref信息找到schema
     fn schema_for_ref<'a>(
         &'a self,
         table_ref: impl Into<TableReference<'a>>,
     ) -> Result<Arc<dyn SchemaProvider>> {
+        // 在未设置schema/catalog的情况下 为table-ref增加default schema/catalog
         let resolved_ref = self.resolve_table_ref(table_ref);
+        // 针对存储基础信息的schema 使用特殊的对象
         if self.config.information_schema() && resolved_ref.schema == INFORMATION_SCHEMA {
             return Ok(Arc::new(InformationSchemaProvider::new(
                 self.catalog_list.clone(),
             )));
         }
 
+        // 其余情况从catalog-list中找到schema
         self.catalog_list
             .catalog(&resolved_ref.catalog)
             .ok_or_else(|| {
@@ -1530,12 +1627,14 @@ impl SessionState {
     }
 
     /// Convert a SQL string into an AST Statement
+    /// 将sql转换成会话对象
     pub fn sql_to_statement(
         &self,
         sql: &str,
         dialect: &str,
     ) -> Result<datafusion_sql::parser::Statement> {
         let dialect = create_dialect_from_str(dialect)?;
+        // 借助第三方库 将sql语句解析成statement
         let mut statements = DFParser::parse_sql_with_dialect(sql, dialect.as_ref())?;
         if statements.len() > 1 {
             return Err(DataFusionError::NotImplemented(
@@ -1551,6 +1650,7 @@ impl SessionState {
     }
 
     /// Resolve all table references in the SQL statement.
+    /// 获取会话中引用到的所有表名
     pub fn resolve_table_references(
         &self,
         statement: &datafusion_sql::parser::Statement,
@@ -1561,12 +1661,14 @@ impl SessionState {
 
         // Getting `TableProviders` is async but planing is not -- thus pre-fetch
         // table providers for all relations referenced in this query
+        // 存储执行计划中涉及到的所有表名
         let mut relations = hashbrown::HashSet::with_capacity(10);
 
         match statement {
             DFStatement::Statement(s) => {
                 struct RelationVisitor<'a>(&'a mut hashbrown::HashSet<ObjectName>);
 
+                // 会话支持使用观察者处理
                 impl<'a> Visitor for RelationVisitor<'a> {
                     type Break = ();
 
@@ -1605,6 +1707,7 @@ impl SessionState {
         }
 
         // Always include information_schema if available
+        // 总是要追加这些信息表  从信息表可以获取表的col信息，col信息 以及其他的等等
         if self.config.information_schema() {
             for s in INFORMATION_SCHEMA_TABLES {
                 relations.insert(ObjectName(vec![
@@ -1614,8 +1717,11 @@ impl SessionState {
             }
         }
 
+        // 需要标准化处理
         let enable_ident_normalization =
             self.config.options().sql_parser.enable_ident_normalization;
+
+        // 对表名进行规范化处理  就是将x拆分成多部分 分别对应schema。catalog。table
         relations
             .into_iter()
             .map(|x| object_name_to_table_reference(x, enable_ident_normalization))
@@ -1623,10 +1729,12 @@ impl SessionState {
     }
 
     /// Convert an AST Statement into a LogicalPlan
+    /// sql语句经过sql parser处理后会变成会话对象   这里在转换成逻辑计划
     pub async fn statement_to_plan(
         &self,
         statement: datafusion_sql::parser::Statement,
     ) -> Result<LogicalPlan> {
+        // 从会话中抽取出相关表名
         let references = self.resolve_table_references(&statement)?;
 
         let mut provider = SessionContextProvider {
@@ -1640,8 +1748,12 @@ impl SessionState {
             self.config.options().sql_parser.parse_float_as_decimal;
         for reference in references {
             let table = reference.table();
+            // 生成的对象也是包含 catalog schema table
             let resolved = self.resolve_table_ref(&reference);
+
+            // 从表仓库中找到对应表  并添加到map中
             if let Entry::Vacant(v) = provider.tables.entry(resolved.to_string()) {
+                // 找到表 添加到SessionContextProvider中
                 if let Ok(schema) = self.schema_for_ref(resolved) {
                     if let Some(table) = schema.table(table).await {
                         v.insert(provider_as_source(table));
@@ -1651,27 +1763,35 @@ impl SessionState {
         }
 
         let query = SqlToRel::new_with_options(
-            &provider,
-            ParserOptions {
+            &provider,  // 需要的表以及各种辅助信息都在里面了
+            ParserOptions {  // 解析相关的选项 可以先忽略
                 parse_float_as_decimal,
                 enable_ident_normalization,
             },
         );
+        // 通过该对象将会话变成逻辑计划
         query.statement_to_plan(statement)
     }
 
     /// Creates a [`LogicalPlan`] from the provided SQL string
     ///
     /// See [`SessionContext::sql`] for a higher-level interface that also handles DDL
+    /// 将sql语句转换成逻辑计划
     pub async fn create_logical_plan(&self, sql: &str) -> Result<LogicalPlan> {
+        // 不同的数据库有自己的"方言" 设置后才知道如何解析某些数据库独有的关键字
         let dialect = self.config.options().sql_parser.dialect.as_str();
+        // 将sql解析成会话
         let statement = self.sql_to_statement(sql, dialect)?;
+        // 将会话转换成plan
         let plan = self.statement_to_plan(statement).await?;
         Ok(plan)
     }
 
     /// Optimizes the logical plan by applying optimizer rules.
+    /// 对逻辑计划进行优化
     pub fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+
+        // TODO
         if let LogicalPlan::Explain(e) = plan {
             let mut stringified_plans = e.stringified_plans.clone();
 
@@ -1734,9 +1854,11 @@ impl SessionState {
                 logical_optimization_succeeded,
             }))
         } else {
+            // 先用分析其判断plan能否被优化
             let analyzed_plan =
                 self.analyzer
                     .execute_and_check(plan, self.options(), |_, _| {})?;
+            // 通过优化器优化
             self.optimizer.optimize(&analyzed_plan, self, |_, _| {})
         }
     }
@@ -1744,11 +1866,14 @@ impl SessionState {
     /// Creates a physical plan from a logical plan.
     ///
     /// Note: this first calls [`Self::optimize`] on the provided plan
+    /// 逻辑计划无法直接执行 需要转换成物理计划
     pub async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        // TODO 先忽略优化逻辑  无论怎么优化 还是以logicalPlan的形式展示
         let logical_plan = self.optimize(logical_plan)?;
+        // planner 负责将逻辑计划变成物理计划
         self.query_planner
             .create_physical_plan(&logical_plan, self)
             .await
@@ -1807,10 +1932,14 @@ impl SessionState {
 
 struct SessionContextProvider<'a> {
     state: &'a SessionState,
+    // 代表一次会话中涉及到的表
     tables: HashMap<String, Arc<dyn TableSource>>,
 }
 
+// 作为一个上下文对象  在进行会话中需要访问他
 impl<'a> ContextProvider for SessionContextProvider<'a> {
+
+    // 根据引用返回对应表
     fn get_table_provider(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {
         let name = self.state.resolve_table_ref(name).to_string();
         self.tables
@@ -1827,11 +1956,13 @@ impl<'a> ContextProvider for SessionContextProvider<'a> {
         self.state.aggregate_functions().get(name).cloned()
     }
 
+    // 获取变量的数据类型
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
         if variable_names.is_empty() {
             return None;
         }
 
+        // 如果有@@前缀就代表是系统变量
         let provider_type = if is_system_variables(variable_names) {
             VarType::System
         } else {

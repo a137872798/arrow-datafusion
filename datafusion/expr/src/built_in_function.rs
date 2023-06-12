@@ -22,7 +22,7 @@ use datafusion_common::{DataFusionError, Result};
 use std::fmt;
 use std::str::FromStr;
 
-/// Enum of all built-in scalar functions
+/// Enum of all built-in scalar functions   内建函数 应该就是天然支持的函数 比如Now()
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinScalarFunction {
     // math functions
@@ -195,6 +195,7 @@ pub enum BuiltinScalarFunction {
 impl BuiltinScalarFunction {
     /// an allowlist of functions to take zero arguments, so that they will get special treatment
     /// while executing.
+    /// 哪些函数是不需要参数的
     pub fn supports_zero_argument(&self) -> bool {
         matches!(
             self,
@@ -207,6 +208,7 @@ impl BuiltinScalarFunction {
         )
     }
     /// Returns the [Volatility] of the builtin function.
+    /// 返回内建函数的波动性
     pub fn volatility(&self) -> Volatility {
         match self {
             // Immutable scalar builtins

@@ -114,11 +114,11 @@ fn split_conjunction_impl<'a>(
 ///
 /// 1) If there is mapping in Alias Map, replace the Column in the output expressions with the 1st Column in Alias Map
 /// 2) If the Column is invalid for the current Schema, replace the Column with a place holder UnKnownColumn
-///
+/// 对表达式进行改写
 pub fn normalize_out_expr_with_alias_schema(
-    expr: Arc<dyn PhysicalExpr>,
-    alias_map: &HashMap<Column, Vec<Column>>,
-    schema: &SchemaRef,
+    expr: Arc<dyn PhysicalExpr>,  // 原表达式
+    alias_map: &HashMap<Column, Vec<Column>>,  // 别名容器
+    schema: &SchemaRef,  // 新的schema 也就是别名生效的schema
 ) -> Arc<dyn PhysicalExpr> {
     expr.clone()
         .transform(&|expr| {
@@ -126,12 +126,13 @@ pub fn normalize_out_expr_with_alias_schema(
                 .as_any()
                 .downcast_ref::<Column>()
             {
+                // 拿到列
                 Some(column) => {
                     alias_map
                         .get(column)
-                        .map(|c| Arc::new(c[0].clone()) as _)
+                        .map(|c| Arc::new(c[0].clone()) as _) // 映射成新的col
                         .or_else(|| match schema.index_of(column.name()) {
-                            // Exactly matching, return None, no need to do the transform
+                            // Exactly matching, return None, no need to do the transform  无需改写
                             Ok(idx) if column.index() == idx => None,
                             _ => Some(Arc::new(UnKnownColumn::new(column.name())) as _),
                         })
@@ -147,6 +148,7 @@ pub fn normalize_out_expr_with_alias_schema(
         .unwrap_or(expr)
 }
 
+// 如果expr内的col 出现在eq_classes中 替换成head col
 pub fn normalize_expr_with_equivalence_properties(
     expr: Arc<dyn PhysicalExpr>,
     eq_properties: &[EquivalentClass],
@@ -157,6 +159,7 @@ pub fn normalize_expr_with_equivalence_properties(
                 expr.as_any().downcast_ref::<Column>().and_then(|column| {
                     for class in eq_properties {
                         if class.contains(column) {
+                            // 把列给替换掉了 eq_properties的意思是内部的col都是等效的  发现等效的col后 统一替换成head
                             return Some(Arc::new(class.head().clone()) as _);
                         }
                     }
@@ -395,16 +398,18 @@ pub fn convert_to_expr<T: Borrow<PhysicalSortExpr>>(
 /// account equivalences according to `equal_properties`.
 pub fn get_indices_of_matching_exprs<
     T: Borrow<Arc<dyn PhysicalExpr>>,
-    F: FnOnce() -> EquivalenceProperties,
+    F: FnOnce() -> EquivalenceProperties,  // 用于替换等效的列
 >(
     targets: impl IntoIterator<Item = T>,
     items: &[Arc<dyn PhysicalExpr>],
     equal_properties: F,
 ) -> Vec<usize> {
     if let eq_classes @ [_, ..] = equal_properties().classes() {
+        // 通过 eq_classes处理后 等效的col 都被替换成head
         let normalized_targets = targets.into_iter().map(|e| {
             normalize_expr_with_equivalence_properties(e.borrow().clone(), eq_classes)
         });
+        // items也做了替换
         let normalized_items = items
             .iter()
             .map(|e| normalize_expr_with_equivalence_properties(e.clone(), eq_classes))
@@ -417,6 +422,7 @@ pub fn get_indices_of_matching_exprs<
 
 /// This function finds the indices of `targets` within `items` using strict
 /// equality.
+/// 得到的是一个映射数组 targets = items[x] 将x收集起来作为结果
 fn get_indices_of_exprs_strict<T: Borrow<Arc<dyn PhysicalExpr>>>(
     targets: impl IntoIterator<Item = T>,
     items: &[Arc<dyn PhysicalExpr>],

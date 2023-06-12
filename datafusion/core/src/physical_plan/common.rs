@@ -184,13 +184,16 @@ pub(crate) fn spawn_execution(
 ///
 /// Only computes statistics that are in arrows metadata (num rows, byte size and nulls)
 /// and does not apply any kernel on the actual data.
+/// 从结果集中提取出统计数据
 pub fn compute_record_batch_statistics(
-    batches: &[Vec<RecordBatch>],
+    batches: &[Vec<RecordBatch>],  // 外层的数组代表分区 每个分区又有一组结果集
     schema: &Schema,
     projection: Option<Vec<usize>>,
 ) -> Statistics {
+    // 每个结果集都会记录行数信息
     let nb_rows = batches.iter().flatten().map(RecordBatch::num_rows).sum();
 
+    // 评估结果集总计需要占用多少内存
     let total_byte_size = batches.iter().flatten().map(batch_byte_size).sum();
 
     let projection = match projection {
@@ -198,11 +201,13 @@ pub fn compute_record_batch_statistics(
         None => (0..schema.fields().len()).collect(),
     };
 
+    // 只有要被保留的col才需要统计对象
     let mut column_statistics = vec![ColumnStatistics::default(); projection.len()];
 
     for partition in batches.iter() {
         for batch in partition {
             for (stat_index, col_index) in projection.iter().enumerate() {
+                // 将不同分区/不同结果集下 同一列数据的null_count累加起来
                 *column_statistics[stat_index].null_count.get_or_insert(0) +=
                     batch.column(*col_index).null_count();
             }

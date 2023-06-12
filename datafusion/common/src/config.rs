@@ -152,28 +152,33 @@ macro_rules! config_namespace {
 }
 
 config_namespace! {
-    /// Options related to catalog and directory scanning
+    /// Options related to catalog and directory scanning   目录相关的选项
     pub struct CatalogOptions {
         /// Whether the default catalog and schema should be created automatically.
+        /// 是否自动创建 default catalog and schema
         pub create_default_catalog_and_schema: bool, default = true
 
         /// The default catalog name - this impacts what SQL queries use if not specified
         pub default_catalog: String, default = "datafusion".to_string()
 
         /// The default schema name - this impacts what SQL queries use if not specified
+        /// 默认使用的schema
         pub default_schema: String, default = "public".to_string()
 
         /// Should DataFusion provide access to `information_schema`
         /// virtual tables for displaying schema information
+        /// 是否需要提供一个虚拟表用于查询schema信息
         pub information_schema: bool, default = false
 
         /// Location scanned to load tables for `default` schema
+        /// 默认schema从哪里检索表
         pub location: Option<String>, default = None
 
         /// Type of `TableProvider` to use when loading `default` schema
         pub format: Option<String>, default = None
 
         /// If the file has a header
+        /// 是否有文件头
         pub has_header: bool, default = false
     }
 }
@@ -199,20 +204,23 @@ config_namespace! {
     pub struct ExecutionOptions {
         /// Default batch size while creating new batches, it's especially useful for
         /// buffer-in-memory batches since creating tiny batches would result in too much
-        /// metadata memory consumption
+        /// metadata memory consumption  默认批大小
         pub batch_size: usize, default = 8192
 
         /// When set to true, record batches will be examined between each operator and
         /// small batches will be coalesced into larger batches. This is helpful when there
         /// are highly selective filters or joins that could produce tiny output batches. The
         /// target batch size is determined by the configuration setting
+        /// 会自动将小批次合并成大批次
         pub coalesce_batches: bool, default = true
 
         /// Should DataFusion collect statistics after listing files
+        /// 自动采集统计信息
         pub collect_statistics: bool, default = false
 
         /// Number of partitions for query execution. Increasing partitions can increase
         /// concurrency. Defaults to the number of CPU cores on the system
+        /// 执行时将数据分区  可以提高并行度
         pub target_partitions: usize, default = num_cpus::get()
 
         /// The default time zone
@@ -222,15 +230,17 @@ config_namespace! {
         pub time_zone: Option<String>, default = Some("+00:00".into())
 
         /// Parquet options
+        /// Parquet的选项
         pub parquet: ParquetOptions, default = Default::default()
     }
 }
 
 config_namespace! {
-    /// Options related to reading of parquet files
+    /// Options related to reading of parquet files    parquet文件相关的选项
     pub struct ParquetOptions {
         /// If true, uses parquet data page level metadata (Page Index) statistics
         /// to reduce the number of rows decoded.
+        /// 使用parquet的元数据
         pub enable_page_index: bool, default = false
 
         /// If true, the parquet reader attempts to skip entire row groups based
@@ -261,10 +271,11 @@ config_namespace! {
 }
 
 config_namespace! {
-    /// Options related to query optimization
+    /// Options related to query optimization  查询优化相关的
     pub struct OptimizerOptions {
         /// When set to true, the physical plan optimizer will try to add round robin
         /// repartitioning to increase parallelism to leverage more CPU cores
+        /// 开启时 尝试重新分区以增加并行度
         pub enable_round_robin_repartition: bool, default = true
 
         /// When set to true, the optimizer will insert filters before a join between
@@ -301,6 +312,7 @@ config_namespace! {
 
         /// Should DataFusion repartition data using the partitions keys to execute window
         /// functions in parallel using the provided `target_partitions` level
+        /// 在执行窗口函数时 是否尝试按照target_partitions进行重分区
         pub repartition_windows: bool, default = true
 
         /// Should DataFusion execute sorts in a per-partition fashion and merge
@@ -362,14 +374,15 @@ pub struct ConfigEntry {
 }
 
 /// Configuration options struct, able to store both built-in configuration and custom options
+/// 执行过程中上下文配置
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ConfigOptions {
     /// Catalog options
     pub catalog: CatalogOptions,
-    /// Execution options
+    /// Execution options  执行选项
     pub execution: ExecutionOptions,
-    /// Optimizer options
+    /// Optimizer options  优化相关的选项
     pub optimizer: OptimizerOptions,
     /// SQL parser options
     pub sql_parser: SqlParserOptions,
@@ -383,6 +396,8 @@ impl ConfigField for ConfigOptions {
     fn set(&mut self, key: &str, value: &str) -> Result<()> {
         // Extensions are handled in the public `ConfigOptions::set`
         let (key, rem) = key.split_once('.').unwrap_or((key, ""));
+
+        // key 匹配opts前缀
         match key {
             "catalog" => self.catalog.set(rem, value),
             "execution" => self.execution.set(rem, value),
@@ -417,6 +432,7 @@ impl ConfigOptions {
     }
 
     /// Set a configuration option
+    /// 给某个option配置值
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         let (prefix, key) = key.split_once('.').ok_or_else(|| {
             DataFusionError::External(
@@ -442,10 +458,12 @@ impl ConfigOptions {
     ///
     /// For example, setting `DATAFUSION_EXECUTION_BATCH_SIZE` will
     /// control `datafusion.execution.batch_size`.
+    /// 从环境变量中初始化
     pub fn from_env() -> Result<Self> {
         struct Visitor(Vec<String>);
 
         impl Visit for Visitor {
+            // 每个选项会触发some方法
             fn some<V: Display>(&mut self, key: &str, _: V, _: &'static str) {
                 self.0.push(key.to_string())
             }
@@ -464,6 +482,7 @@ impl ConfigOptions {
         let mut ret = Self::default();
         ret.visit(&mut keys, "datafusion", "");
 
+        // 把key填充后 从系统变量中读取 并set
         for key in keys.0 {
             let env = key.to_uppercase().replace('.', "_");
             if let Some(var) = std::env::var_os(env) {
@@ -541,6 +560,7 @@ pub trait ConfigExtension: ExtensionOptions {
     /// Configuration namespace prefix to use
     ///
     /// All values under this will be prefixed with `$PREFIX + "."`
+    /// 给拓展项 追加一个命名空间
     const PREFIX: &'static str;
 }
 

@@ -25,6 +25,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 /// Represent a list of named catalogs
+/// 目录列表 可以检索下面所有目录
 pub trait CatalogList: Sync + Send {
     /// Returns the catalog list as [`Any`](std::any::Any)
     /// so that it can be downcast to a specific implementation.
@@ -46,6 +47,7 @@ pub trait CatalogList: Sync + Send {
 }
 
 /// Simple in-memory list of catalogs
+/// 将目录保存在内存中
 pub struct MemoryCatalogList {
     /// Collection of catalogs containing schemas and ultimately TableProviders
     pub catalogs: DashMap<String, Arc<dyn CatalogProvider>>,

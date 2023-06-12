@@ -78,10 +78,11 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
+/// 先是创建一个函数的名称
 fn create_function_physical_name(
     fun: &str,
     distinct: bool,
-    args: &[Expr],
+    args: &[Expr], // 函数的名字会跟着expr变化
 ) -> Result<String> {
     let names: Vec<String> = args
         .iter()
@@ -99,12 +100,15 @@ fn physical_name(e: &Expr) -> Result<String> {
     create_physical_name(e, true)
 }
 
+/// 为一个逻辑表达式生成物理表达式名称
+/// is_first_expr 代表这是在外层 因为会有嵌套结构
 fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
     match e {
         Expr::Column(c) => {
             if is_first_expr {
                 Ok(c.name.clone())
             } else {
+                // 表名+列名
                 Ok(c.flat_name())
             }
         }
@@ -354,6 +358,7 @@ fn create_physical_name(e: &Expr, is_first_expr: bool) -> Result<String> {
 
 /// Physical query planner that converts a `LogicalPlan` to an
 /// `ExecutionPlan` suitable for execution.
+/// 该对象可以将逻辑表达式 逻辑计划 转换成物理表达式 物理计划
 #[async_trait]
 pub trait PhysicalPlanner: Send + Sync {
     /// Create a physical plan from a logical plan
@@ -381,6 +386,7 @@ pub trait PhysicalPlanner: Send + Sync {
 }
 
 /// This trait exposes the ability to plan an [`ExecutionPlan`] out of a [`LogicalPlan`].
+/// 目前没有内置实现
 #[async_trait]
 pub trait ExtensionPlanner {
     /// Create a physical plan for a [`UserDefinedLogicalNode`].
@@ -405,6 +411,8 @@ pub trait ExtensionPlanner {
 
 /// Default single node physical query planner that converts a
 /// `LogicalPlan` to an `ExecutionPlan` suitable for execution.
+/// 该对象可以将逻辑计划变成物理计划
+/// 每次将一个逻辑计划转变成物理计划时 会对应一个新对象
 #[derive(Default)]
 pub struct DefaultPhysicalPlanner {
     extension_planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>>,
@@ -413,6 +421,7 @@ pub struct DefaultPhysicalPlanner {
 #[async_trait]
 impl PhysicalPlanner for DefaultPhysicalPlanner {
     /// Create a physical plan from a logical plan
+    /// 通过该方法可以将一个逻辑计划变成执行计划
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
@@ -465,6 +474,7 @@ impl DefaultPhysicalPlanner {
     }
 
     /// Create a physical plan from a logical plan
+    /// 通过该方法将逻辑计划变成物理计划
     fn create_initial_plan<'a>(
         &'a self,
         logical_plan: &'a LogicalPlan,
@@ -472,6 +482,7 @@ impl DefaultPhysicalPlanner {
     ) -> BoxFuture<'a, Result<Arc<dyn ExecutionPlan>>> {
         async move {
             let exec_plan: Result<Arc<dyn ExecutionPlan>> = match logical_plan {
+                // 对应一个查询操作
                 LogicalPlan::TableScan(TableScan {
                     source,
                     projection,
@@ -479,22 +490,30 @@ impl DefaultPhysicalPlanner {
                     fetch,
                     ..
                 }) => {
+                    // 取出内部的provider
                     let source = source_as_provider(source)?;
                     // Remove all qualifiers from the scan as the provider
                     // doesn't know (nor should care) how the relation was
                     // referred to in the query
+                    // 抹掉col的表名信息
                     let filters = unnormalize_cols(filters.iter().cloned());
+                    // 去掉别名
                     let unaliased: Vec<Expr> = filters.into_iter().map(unalias).collect();
                     source.scan(session_state, projection.as_ref(), &unaliased, *fetch).await
                 }
+
+                // 对应一组已经存在的值
                 LogicalPlan::Values(Values {
                     values,
                     schema,
                 }) => {
                     let exec_schema = schema.as_ref().to_owned().into();
                     let exprs = values.iter()
+                        // 每个expr对应一个值 然后这是一个Vec对应一个row
                         .map(|row| {
+                            // 每个对应一列
                             row.iter().map(|expr| {
+                                // 将逻辑表达式 转换成物理表达式
                                 self.create_physical_expr(
                                     expr,
                                     schema,
@@ -505,31 +524,39 @@ impl DefaultPhysicalPlanner {
                             .collect::<Result<Vec<Arc<dyn PhysicalExpr>>>>()
                         })
                         .collect::<Result<Vec<_>>>()?;
+
+                    // 对应一个物理计划
                     let value_exec = ValuesExec::try_new(
                         SchemaRef::new(exec_schema),
                         exprs,
                     )?;
                     Ok(Arc::new(value_exec))
                 }
+
                 LogicalPlan::Window(Window {
                     input, window_expr, ..
                 }) => {
+                    // 有关窗口函数的逻辑计划 内部肯定有窗口函数
                     if window_expr.is_empty() {
                         return Err(DataFusionError::Internal(
                             "Impossibly got empty window expression".to_owned(),
                         ));
                     }
 
+                    // 将内部的plan 转换成物理计划
                     let input_exec = self.create_initial_plan(input, session_state).await?;
 
                     // at this moment we are guaranteed by the logical planner
                     // to have all the window_expr to have equal sort key
+                    // 返回共享的最小分区键 实际上分区键应该是一样的 在builder构建window时已经有体现
                     let partition_keys = window_expr_common_partition_keys(window_expr)?;
 
                     let can_repartition = !partition_keys.is_empty()
                         && session_state.config().target_partitions() > 1
+                        // 支持重分区
                         && session_state.config().repartition_window_functions();
 
+                    // 分区相关的expr转换成 PhysicalExpr
                     let physical_partition_keys = if can_repartition
                     {
                         partition_keys
@@ -547,7 +574,9 @@ impl DefaultPhysicalPlanner {
                         vec![]
                     };
 
+                    // 声明一个函数 基于表达式类型 产生排序键
                     let get_sort_keys = |expr: &Expr| match expr {
+                        // 根据内部表达式的类型 走不同分支
                         Expr::WindowFunction(WindowFunction{
                             ref partition_by,
                             ref order_by,
@@ -565,6 +594,7 @@ impl DefaultPhysicalPlanner {
                         }
                         _ => unreachable!(),
                     };
+                    // 因为他们的分区键都是一样的 所以只需要查看第一个expr就可以了
                     let sort_keys = get_sort_keys(&window_expr[0])?;
                     if window_expr.len() > 1 {
                         debug_assert!(
@@ -577,6 +607,8 @@ impl DefaultPhysicalPlanner {
 
                     let logical_input_schema = input.schema();
                     let physical_input_schema = input_exec.schema();
+
+                    // 将每个窗口表达式 转换成物理表达式
                     let window_expr = window_expr
                         .iter()
                         .map(|e| {
@@ -589,11 +621,13 @@ impl DefaultPhysicalPlanner {
                         })
                         .collect::<Result<Vec<_>>>()?;
 
+                    // 判断是否使用有限的内存
                     let uses_bounded_memory = window_expr
                         .iter()
                         .all(|e| e.uses_bounded_memory());
                     // If all window expressions can run with bounded memory,
                     // choose the bounded window variant:
+                    // 根据使用的内存是否有限制 会创建不同对象 BoundedWindowAggExec 每次读取部分数据 通过window进行处理，并清理掉更早的数据 以腾出内存
                     Ok(if uses_bounded_memory {
                         Arc::new(BoundedWindowAggExec::try_new(
                             window_expr,
@@ -602,6 +636,7 @@ impl DefaultPhysicalPlanner {
                             physical_partition_keys,
                         )?)
                     } else {
+                        // 这个就是取出数据后暂存 当所有数据都取完后 通过window函数一次处理
                         Arc::new(WindowAggExec::try_new(
                             window_expr,
                             input_exec,
@@ -610,6 +645,8 @@ impl DefaultPhysicalPlanner {
                         )?)
                     })
                 }
+
+                // 接下来处理聚合的逻辑计划
                 LogicalPlan::Aggregate(Aggregate {
                     input,
                     group_expr,
@@ -617,16 +654,21 @@ impl DefaultPhysicalPlanner {
                     ..
                 }) => {
                     // Initially need to perform the aggregate and then merge the partitions
+                    // 递归 将内部的plan转换成物理计划
                     let input_exec = self.create_initial_plan(input, session_state).await?;
+
+                    // 物理计划的schema 和原来逻辑计划的schema  逻辑计划schema还会关联表  物理计划的就是arrow的schema 没有表信息
                     let physical_input_schema = input_exec.schema();
                     let logical_input_schema = input.as_ref().schema();
 
+                    // PhysicalGroupBy 并不是一个物理计划  只是一个辅助对象
                     let groups = self.create_grouping_physical_expr(
                         group_expr,
                         logical_input_schema,
                         &physical_input_schema,
                         session_state)?;
 
+                    // 将聚合表达式和可能出现的filter表达式 转换成物理表达式
                     let agg_filter = aggr_expr
                         .iter()
                         .map(|e| {
@@ -638,24 +680,31 @@ impl DefaultPhysicalPlanner {
                             )
                         })
                         .collect::<Result<Vec<_>>>()?;
+
+                    // 之前的聚合表达式和filter 都是单个的   这里将2个都变成了vec
                     let (aggregates, filters): (Vec<_>, Vec<_>) = agg_filter.into_iter().unzip();
 
                     let initial_aggr = Arc::new(AggregateExec::try_new(
-                        AggregateMode::Partial,
+                        AggregateMode::Partial,  // 先使用这种模式  这种模式产生的是state 要跟下面的final搭配使用的
+                        // 将3个转换后的对象传进去 完成初始化
                         groups.clone(),
                         aggregates.clone(),
                         filters.clone(),
+                        // 原先的内部plan
                         input_exec,
                         physical_input_schema.clone(),
                     )?);
 
                     // update group column indices based on partial aggregate plan evaluation
+                    // 重新拿到分组用的列  idx被重新设置过
                     let final_group: Vec<Arc<dyn PhysicalExpr>> = initial_aggr.output_group_expr();
 
+                    // 如果支持在聚合时 先进行再分组
                     let can_repartition = !groups.is_empty()
                         && session_state.config().target_partitions() > 1
                         && session_state.config().repartition_aggregations();
 
+                    // 这里又出现了2种新的聚合方式
                     let (initial_aggr, next_partition_mode): (
                         Arc<dyn ExecutionPlan>,
                         AggregateMode,
@@ -676,6 +725,7 @@ impl DefaultPhysicalPlanner {
                             .collect()
                     );
 
+                    // 可以看到这里又套了一层聚合函数
                     Ok(Arc::new(AggregateExec::try_new(
                         next_partition_mode,
                         final_grouping_set,
@@ -685,10 +735,15 @@ impl DefaultPhysicalPlanner {
                         physical_input_schema.clone(),
                     )?))
                 }
+
+                // 在原有plan上 套上一层投影
                 LogicalPlan::Projection(Projection { input, expr, .. }) => {
+
+                    // 将内部计划变成物理计划
                     let input_exec = self.create_initial_plan(input, session_state).await?;
                     let input_schema = input.as_ref().schema();
 
+                    // 代表需要保留的col
                     let physical_exprs = expr
                         .iter()
                         .map(|e| {
@@ -737,6 +792,8 @@ impl DefaultPhysicalPlanner {
                         input_exec,
                     )?))
                 }
+
+                // 对数据集进行过滤
                 LogicalPlan::Filter(filter) => {
                     let physical_input = self.create_initial_plan(&filter.input, session_state).await?;
                     let input_schema = physical_input.as_ref().schema();
@@ -748,8 +805,10 @@ impl DefaultPhysicalPlanner {
                         &input_schema,
                         session_state,
                     )?;
+                    // 生成包含过滤逻辑的物理计划
                     Ok(Arc::new(FilterExec::try_new(runtime_expr, physical_input)?))
                 }
+                // TODO 将不同plan的结果集合在一起
                 LogicalPlan::Union(Union { inputs, schema }) => {
                     let physical_plans = futures::stream::iter(inputs)
                         .then(|lp| self.create_initial_plan(lp, session_state))
@@ -764,6 +823,8 @@ impl DefaultPhysicalPlanner {
                         Ok(Arc::new(UnionExec::new(physical_plans)))
                     }
                 }
+
+                // 代表对结果集进行分区操作
                 LogicalPlan::Repartition(Repartition {
                     input,
                     partitioning_scheme,
@@ -771,6 +832,8 @@ impl DefaultPhysicalPlanner {
                     let physical_input = self.create_initial_plan(input, session_state).await?;
                     let input_schema = physical_input.schema();
                     let input_dfschema = input.as_ref().schema();
+
+                    // 将逻辑计划的分区方案 转换成物理计划的分区方案
                     let physical_partitioning = match partitioning_scheme {
                         LogicalPartitioning::RoundRobinBatch(n) => {
                             Partitioning::RoundRobinBatch(*n)
@@ -798,10 +861,14 @@ impl DefaultPhysicalPlanner {
                         physical_partitioning,
                     )?))
                 }
+
+                // 排序是如何生效的
                 LogicalPlan::Sort(Sort { expr, input, fetch, .. }) => {
                     let physical_input = self.create_initial_plan(input, session_state).await?;
                     let input_schema = physical_input.as_ref().schema();
                     let input_dfschema = input.as_ref().schema();
+
+                    // 处理排序相关的列
                     let sort_expr = expr
                         .iter()
                         .map(|e| match e {
@@ -824,10 +891,13 @@ impl DefaultPhysicalPlanner {
                             )),
                         })
                         .collect::<Result<Vec<_>>>()?;
+                    // 包装排序逻辑
                     let new_sort = SortExec::new(sort_expr, physical_input)
                         .with_fetch(*fetch);
                     Ok(Arc::new(new_sort))
                 }
+
+                // 接下来看连表查询
                 LogicalPlan::Join(Join {
                     left,
                     right,
@@ -841,10 +911,13 @@ impl DefaultPhysicalPlanner {
                     let null_equals_null = *null_equals_null;
 
                     // If join has expression equijoin keys, add physical projecton.
+                    // 代表on上的不是 column
                     let has_expr_join_key = keys.iter().any(|(l, r)| {
                         !(matches!(l, Expr::Column(_))
                             && matches!(r, Expr::Column(_)))
                     });
+
+                    // 只要on上 有任意expr对  不是column  就会进入这个分支
                     if has_expr_join_key {
                         let left_keys = keys
                             .iter()
@@ -856,12 +929,18 @@ impl DefaultPhysicalPlanner {
                             .map(|(_l, r)| r)
                             .cloned()
                             .collect::<Vec<_>>();
+
+                        // 得到的是追加投影后的 左右plan 连接键 以及是否使用了投影
                         let (left, right, column_on, added_project) = {
+
+                            // left 对应追加投影的逻辑计划 left_col_keys 对应连接键(可能套了一层别名) left_projected 代表left是否追加了投影
                             let (left, left_col_keys, left_projected) =
+                            // 检查在join前 是否需要做一层投影
                                 wrap_projection_for_join_if_necessary(
                                     left_keys.as_slice(),
                                     left.as_ref().clone(),
                                 )?;
+                            // 同上
                             let (right, right_col_keys, right_projected) =
                                 wrap_projection_for_join_if_necessary(
                                     &right_keys,
@@ -875,6 +954,9 @@ impl DefaultPhysicalPlanner {
                             )
                         };
 
+                        // 经过上面的处理 已经确保连接键都是Column expr
+
+                        // try_new_with_project_input 代表已经对左右plan做过投影了
                         let join_plan =
                             LogicalPlan::Join(Join::try_new_with_project_input(
                                 logical_plan,
@@ -884,7 +966,10 @@ impl DefaultPhysicalPlanner {
                             )?);
 
                         // Remove temporary projected columns
+                        // 代表增加过投影   投影之后会临时性的展示连接键 但是在最后展示的时候又是不需要它们的 所以要再套一层投影
                         let join_plan = if added_project {
+
+                            // 这个是原本最终期望展示的schema
                             let final_join_result = join_schema
                                 .fields()
                                 .iter()
@@ -903,16 +988,20 @@ impl DefaultPhysicalPlanner {
                             join_plan
                         };
 
+                        // 然后再递归调用该方法   并且因为已经将连接键包装成column了 会进入下面的逻辑
                         return self
                             .create_initial_plan(&join_plan, session_state)
                             .await;
                     }
 
                     // All equi-join keys are columns now, create physical join plan
+                    // 在包装后进入这里
                     let left_df_schema = left.schema();
                     let physical_left = self.create_initial_plan(left, session_state).await?;
                     let right_df_schema = right.schema();
                     let physical_right = self.create_initial_plan(right, session_state).await?;
+
+                    // 将col信息提取出来 变成join on
                     let join_on = keys
                         .iter()
                         .map(|(l, r)| {
@@ -925,18 +1014,22 @@ impl DefaultPhysicalPlanner {
                         })
                         .collect::<Result<join_utils::JoinOn>>()?;
 
+                    // 这块都是处理filter
                     let join_filter = match filter {
                         Some(expr) => {
                             // Extract columns from filter expression and saved in a HashSet
+                            // 取出过滤可能涉及到的col
                             let cols = expr.to_columns()?;
 
                             // Collect left & right field indices, the field indices are sorted in ascending order
+                            // 找到这些列 在左schema的下标
                             let left_field_indices = cols.iter()
                                 .filter_map(|c| match left_df_schema.index_of_column(c) {
                                     Ok(idx) => Some(idx),
                                     _ => None,
                                 }).sorted()
                                 .collect::<Vec<_>>();
+                            // 找到在右schema的下标
                             let right_field_indices = cols.iter()
                                 .filter_map(|c| match right_df_schema.index_of_column(c) {
                                     Ok(idx) => Some(idx),
@@ -945,6 +1038,7 @@ impl DefaultPhysicalPlanner {
                                 .collect::<Vec<_>>();
 
                             // Collect DFFields and Fields required for intermediate schemas
+                            // 拿到过滤字段的 field信息
                             let (filter_df_fields, filter_fields): (Vec<_>, Vec<_>) = left_field_indices.clone()
                                 .into_iter()
                                 .map(|i| (
@@ -963,14 +1057,19 @@ impl DefaultPhysicalPlanner {
 
                             // Construct intermediate schemas used for filtering data and
                             // convert logical expression to physical according to filter schema
+                            // 生成2个schema
                             let filter_df_schema = DFSchema::new_with_metadata(filter_df_fields, HashMap::new())?;
                             let filter_schema = Schema::new_with_metadata(filter_fields, HashMap::new());
+
+                            // 生成物理表达式
                             let filter_expr = create_physical_expr(
                                 expr,
                                 &filter_df_schema,
                                 &filter_schema,
                                 session_state.execution_props(),
                             )?;
+
+                            // 生成过滤信息 内部包含左右表过滤列的下标
                             let column_indices = join_utils::JoinFilter::build_column_indices(left_field_indices, right_field_indices);
 
                             Some(join_utils::JoinFilter::new(
@@ -982,7 +1081,11 @@ impl DefaultPhysicalPlanner {
                         _ => None
                     };
 
+                    // 代表倾向于hashjoin 而不是 sortmergejoin
+                    // 一般来说 hashjoin更快 但是消耗更多内存
                     let prefer_hash_join = session_state.config_options().optimizer.prefer_hash_join;
+
+                    // 连接键为空  所以都是左表每条记录去连接右表的所有记录
                     if join_on.is_empty() {
                         // there is no equal join condition, use the nested loop join
                         // TODO optimize the plan, and use the config of `target_partitions` and `repartition_joins`
@@ -992,22 +1095,27 @@ impl DefaultPhysicalPlanner {
                             join_filter,
                             join_type,
                         )?))
+
+                        // 隐含条件就是 join_on不为空  算法核心就是先排序后合并数据集
                     } else if session_state.config().target_partitions() > 1
                         && session_state.config().repartition_joins()
                         && !prefer_hash_join
                     {
                         // Use SortMergeJoin if hash join is not preferred
                         // Sort-Merge join support currently is experimental
+                        // 该算法不支持filter
                         if join_filter.is_some() {
                             // TODO SortMergeJoinExec need to support join filter
                             Err(DataFusionError::NotImplemented("SortMergeJoinExec does not support join_filter now.".to_string()))
                         } else {
+                            // 获取连接键数量
                             let join_on_len = join_on.len();
                             Ok(Arc::new(SortMergeJoinExec::try_new(
                                 physical_left,
                                 physical_right,
                                 join_on,
                                 *join_type,
+                                // 描述每个连接键期望的排序顺序
                                 vec![SortOptions::default(); join_on_len],
                                 null_equals_null,
                             )?))
@@ -1043,6 +1151,7 @@ impl DefaultPhysicalPlanner {
                         )?))
                     }
                 }
+                // TODO
                 LogicalPlan::CrossJoin(CrossJoin { left, right, .. }) => {
                     let left = self.create_initial_plan(left, session_state).await?;
                     let right = self.create_initial_plan(right, session_state).await?;
@@ -1230,15 +1339,18 @@ impl DefaultPhysicalPlanner {
         }.boxed()
     }
 
+    // 创建group by对象  这里不需要内部的plan 只需要schema信息即可
     fn create_grouping_physical_expr(
         &self,
-        group_expr: &[Expr],
+        group_expr: &[Expr],  // 分组表达式
         input_dfschema: &DFSchema,
         input_schema: &Schema,
         session_state: &SessionState,
     ) -> Result<PhysicalGroupBy> {
+        // 只有一个分组表达式
         if group_expr.len() == 1 {
             match &group_expr[0] {
+                // TODO 忽略前3种 分别是pgsql和spark特有的函数
                 Expr::GroupingSet(GroupingSet::GroupingSets(grouping_sets)) => {
                     merge_grouping_set_physical_expr(
                         grouping_sets,
@@ -1507,8 +1619,9 @@ pub fn is_window_valid(window_frame: &WindowFrame) -> bool {
 }
 
 /// Create a window expression with a name from a logical expression
+/// 创建物理窗口表达式
 pub fn create_window_expr_with_name(
-    e: &Expr,
+    e: &Expr,   // 对应Window类型的expr  内部有window函数
     name: impl Into<String>,
     logical_input_schema: &DFSchema,
     physical_input_schema: &Schema,
@@ -1523,6 +1636,7 @@ pub fn create_window_expr_with_name(
             order_by,
             window_frame,
         }) => {
+            // 将参数转换成物理expr
             let args = args
                 .iter()
                 .map(|e| {
@@ -1548,6 +1662,7 @@ pub fn create_window_expr_with_name(
             let order_by = order_by
                 .iter()
                 .map(|e| match e {
+                    // 排序键 必须是这个类型
                     Expr::Sort(expr::Sort {
                         expr,
                         asc,
@@ -1575,6 +1690,7 @@ pub fn create_window_expr_with_name(
             }
 
             let window_frame = Arc::new(window_frame.clone());
+            // 简单理解就是将内部的逻辑计划 都替换成了物理计划 只有fun被保留
             windows::create_window_expr(
                 fun,
                 name,
@@ -1585,6 +1701,7 @@ pub fn create_window_expr_with_name(
                 physical_input_schema,
             )
         }
+        // 其余expr均报错
         other => Err(DataFusionError::Internal(format!(
             "Invalid window expression '{other:?}'"
         ))),
@@ -1603,6 +1720,8 @@ pub fn create_window_expr(
         Expr::Alias(sub_expr, alias) => (alias.clone(), sub_expr.as_ref()),
         _ => (physical_name(e)?, e),
     };
+
+    // 产生一个window的物理计划
     create_window_expr_with_name(
         e,
         name,
@@ -1612,10 +1731,12 @@ pub fn create_window_expr(
     )
 }
 
+// 物理聚合表达式 + 过滤用的物理表达式
 type AggregateExprWithOptionalFilter =
     (Arc<dyn AggregateExpr>, Option<Arc<dyn PhysicalExpr>>);
 
 /// Create an aggregate expression with a name from a logical expression
+/// 创建 group by having 表达式   这里还会传入name
 pub fn create_aggregate_expr_with_name_and_maybe_filter(
     e: &Expr,
     name: impl Into<String>,
@@ -1650,6 +1771,8 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                 )?),
                 None => None,
             };
+
+            // 转换成物理表达式
             let agg_expr = aggregates::create_aggregate_expr(
                 fun,
                 *distinct,
@@ -1659,6 +1782,8 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
             );
             Ok((agg_expr?, filter))
         }
+
+        // 使用用户定义的聚合函数的场景
         Expr::AggregateUDF { fun, args, filter } => {
             let args = args
                 .iter()
@@ -1686,6 +1811,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                 udaf::create_aggregate_expr(fun, &args, physical_input_schema, name);
             Ok((agg_expr?, filter))
         }
+        // 其余情况不支持
         other => Err(DataFusionError::Internal(format!(
             "Invalid aggregate expression '{other:?}'"
         ))),
@@ -1693,8 +1819,9 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
 }
 
 /// Create an aggregate expression from a logical expression or an alias
+/// 处理 group by having
 pub fn create_aggregate_expr_and_maybe_filter(
-    e: &Expr,
+    e: &Expr,   // 每次只对应一个表达式
     logical_input_schema: &DFSchema,
     physical_input_schema: &Schema,
     execution_props: &ExecutionProps,
@@ -1715,6 +1842,7 @@ pub fn create_aggregate_expr_and_maybe_filter(
 }
 
 /// Create a physical sort expression from a logical expression
+/// 生成物理排序表达式
 pub fn create_physical_sort_expr(
     e: &Expr,
     input_dfschema: &DFSchema,
@@ -1734,6 +1862,7 @@ impl DefaultPhysicalPlanner {
     /// Returns
     /// Some(plan) if optimized, and None if logical_plan was not an
     /// explain (and thus needs to be optimized as normal)
+    /// 该方法只支持处理EXPLAIN类型的查询
     async fn handle_explain(
         &self,
         logical_plan: &LogicalPlan,
@@ -1743,8 +1872,10 @@ impl DefaultPhysicalPlanner {
             use PlanType::*;
             let mut stringified_plans = vec![];
 
+            // 一些选项信息
             let config = &session_state.config_options().explain;
 
+            // TODO
             if !config.physical_plan_only {
                 stringified_plans = e.stringified_plans.clone();
                 if e.logical_optimization_succeeded {
@@ -1753,6 +1884,7 @@ impl DefaultPhysicalPlanner {
             }
 
             if !config.logical_plan_only && e.logical_optimization_succeeded {
+                // 逻辑计划变成物理计划
                 match self
                     .create_initial_plan(e.plan.as_ref(), session_state)
                     .await
@@ -1802,6 +1934,7 @@ impl DefaultPhysicalPlanner {
 
     /// Optimize a physical plan by applying each physical optimizer,
     /// calling observer(plan, optimizer after each one)
+    /// 通过该方法优化物理计划
     fn optimize_internal<F>(
         &self,
         plan: Arc<dyn ExecutionPlan>,

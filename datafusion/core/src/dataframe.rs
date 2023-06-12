@@ -81,7 +81,9 @@ use crate::prelude::SessionContext;
 /// ```
 #[derive(Debug, Clone)]
 pub struct DataFrame {
+    // 其中包含了各种配置/选项等
     session_state: SessionState,
+    // 逻辑计划
     plan: LogicalPlan,
 }
 
@@ -96,6 +98,7 @@ impl DataFrame {
 
     /// Create a physical plan
     pub async fn create_physical_plan(self) -> Result<Arc<dyn ExecutionPlan>> {
+        // 逻辑计划无法直接执行 需要转换成物理计划
         self.session_state.create_physical_plan(&self.plan).await
     }
 
@@ -114,10 +117,12 @@ impl DataFrame {
     /// # }
     /// ```
     pub fn select_columns(self, columns: &[&str]) -> Result<DataFrame> {
+        // 输入了某些列名 通过schema可以找到对应的field
         let fields = columns
             .iter()
             .map(|name| self.plan.schema().field_with_unqualified_name(name))
             .collect::<Result<Vec<_>>>()?;
+        // 将这些field包装成 expr::col
         let expr: Vec<Expr> = fields
             .iter()
             .map(|f| Expr::Column(f.qualified_column()))
@@ -139,12 +144,16 @@ impl DataFrame {
     /// # }
     /// ```
     pub fn select(self, expr_list: Vec<Expr>) -> Result<DataFrame> {
+        // 找到所有的WindowFunction 并收集起来
         let window_func_exprs = find_window_exprs(&expr_list);
+        // 没有提取出窗口函数 就不需要额外处理
         let plan = if window_func_exprs.is_empty() {
             self.plan
         } else {
+            // 在plan上追加一层窗口函数
             LogicalPlanBuilder::window_plan(self.plan, window_func_exprs)?
         };
+        // 代表结果中只需要包含这几行
         let project_plan = LogicalPlanBuilder::from(plan).project(expr_list)?.build()?;
 
         Ok(DataFrame::new(self.session_state, project_plan))
@@ -163,6 +172,7 @@ impl DataFrame {
     /// # Ok(())
     /// # }
     /// ```
+    /// 解除嵌套
     pub fn unnest_column(self, column: &str) -> Result<DataFrame> {
         let plan = LogicalPlanBuilder::from(self.plan)
             .unnest_column(column)?
@@ -183,6 +193,7 @@ impl DataFrame {
     /// # Ok(())
     /// # }
     /// ```
+    /// 给某个plan追加一个过滤条件
     pub fn filter(self, predicate: Expr) -> Result<DataFrame> {
         let plan = LogicalPlanBuilder::from(self.plan)
             .filter(predicate)?
@@ -525,11 +536,11 @@ impl DataFrame {
     /// ```
     pub fn join(
         self,
-        right: DataFrame,
-        join_type: JoinType,
-        left_cols: &[&str],
+        right: DataFrame,  // 将本dataframe与其他的dataframe进行合并
+        join_type: JoinType,   // 连接方式
+        left_cols: &[&str],   // 用于关联2表的列
         right_cols: &[&str],
-        filter: Option<Expr>,
+        filter: Option<Expr>,  // 对结果集进行过滤
     ) -> Result<DataFrame> {
         let plan = LogicalPlanBuilder::from(self.plan)
             .join(
@@ -604,6 +615,7 @@ impl DataFrame {
     /// # Ok(())
     /// # }
     /// ```
+    /// 对结果进行重分区
     pub fn repartition(self, partitioning_scheme: Partitioning) -> Result<DataFrame> {
         let plan = LogicalPlanBuilder::from(self.plan)
             .repartition(partitioning_scheme)?
@@ -627,6 +639,7 @@ impl DataFrame {
     /// ```
     pub async fn count(self) -> Result<usize> {
         let rows = self
+            // 执行count(1)
             .aggregate(
                 vec![],
                 vec![datafusion_expr::count(Expr::Literal(COUNT_STAR_EXPANSION))],
@@ -658,9 +671,12 @@ impl DataFrame {
     /// # Ok(())
     /// # }
     /// ```
+    ///
     pub async fn collect(self) -> Result<Vec<RecordBatch>> {
+        // 在执行sql前 需要生成上下文对象
         let task_ctx = Arc::new(self.task_ctx());
         let plan = self.create_physical_plan().await?;
+        // 运行物理计划
         collect(plan, task_ctx).await
     }
 
@@ -737,6 +753,7 @@ impl DataFrame {
     /// # Ok(())
     /// # }
     /// ```
+    /// 产生结果并对结果集进行分区
     pub async fn collect_partitioned(self) -> Result<Vec<Vec<RecordBatch>>> {
         let task_ctx = Arc::new(self.task_ctx());
         let plan = self.create_physical_plan().await?;
@@ -756,6 +773,7 @@ impl DataFrame {
     /// # Ok(())
     /// # }
     /// ```
+    /// 按分区拆分 返回各个流
     pub async fn execute_stream_partitioned(
         self,
     ) -> Result<Vec<SendableRecordBatchStream>> {
@@ -806,6 +824,7 @@ impl DataFrame {
     /// Note: This method should not be used outside testing, as it loses the snapshot
     /// of the [`SessionState`] attached to this [`DataFrame`] and consequently subsequent
     /// operations may take place against a different state
+    /// 优化执行计划
     pub fn into_optimized_plan(self) -> Result<LogicalPlan> {
         // Optimize the plan first for better UX
         self.session_state.optimize(&self.plan)
@@ -845,6 +864,7 @@ impl DataFrame {
     /// # Ok(())
     /// # }
     /// ```
+    /// 产生一个解释对象 其中包含计划需要经历的各个阶段
     pub fn explain(self, verbose: bool, analyze: bool) -> Result<DataFrame> {
         let plan = LogicalPlanBuilder::from(self.plan)
             .explain(verbose, analyze)?
@@ -917,7 +937,7 @@ impl DataFrame {
         ))
     }
 
-    /// Write a `DataFrame` to a CSV file.
+    /// Write a `DataFrame` to a CSV file.  TODO
     pub async fn write_csv(self, path: &str) -> Result<()> {
         let plan = self.session_state.create_physical_plan(&self.plan).await?;
         let task_ctx = Arc::new(self.task_ctx());
@@ -932,6 +952,7 @@ impl DataFrame {
     ) -> Result<()> {
         let plan = self.session_state.create_physical_plan(&self.plan).await?;
         let task_ctx = Arc::new(self.task_ctx());
+        // 执行plan 并将结果写入到parquet文件中
         plan_to_parquet(task_ctx, plan, path, writer_properties).await
     }
 
@@ -956,6 +977,7 @@ impl DataFrame {
     /// # }
     /// ```
     pub fn with_column(self, name: &str, expr: Expr) -> Result<DataFrame> {
+        // 如果表达式中包含window_func需要追加到plan上
         let window_func_exprs = find_window_exprs(&[expr.clone()]);
         let plan = if window_func_exprs.is_empty() {
             self.plan
@@ -963,8 +985,10 @@ impl DataFrame {
             LogicalPlanBuilder::window_plan(self.plan, window_func_exprs)?
         };
 
+        // 套一层别名
         let new_column = expr.alias(name);
         let mut col_exists = false;
+
         let mut fields: Vec<Expr> = plan
             .schema()
             .fields()
@@ -982,10 +1006,12 @@ impl DataFrame {
             })
             .collect();
 
+        // 添加别名列
         if !col_exists {
             fields.push(new_column);
         }
 
+        // plan + 投影 产生逻辑计划对象
         let project_plan = LogicalPlanBuilder::from(plan).project(fields)?.build()?;
 
         Ok(DataFrame::new(self.session_state, project_plan))
@@ -1007,8 +1033,8 @@ impl DataFrame {
     /// ```
     pub fn with_column_renamed(
         self,
-        old_name: impl Into<Column>,
-        new_name: &str,
+        old_name: impl Into<Column>,   // col的原名
+        new_name: &str,           // 新名
     ) -> Result<DataFrame> {
         let old_name: Column = old_name.into();
 
@@ -1026,6 +1052,7 @@ impl DataFrame {
             .fields()
             .iter()
             .map(|f| {
+                // 追加一层别名
                 if f == field_to_rename {
                     col(f.qualified_column()).alias(new_name)
                 } else {
@@ -1040,6 +1067,7 @@ impl DataFrame {
     }
 
     /// Convert a prepare logical plan into its inner logical plan with all params replaced with their corresponding values
+    /// 使用常量替换plan内的占位符
     pub fn with_param_values(self, param_values: Vec<ScalarValue>) -> Result<Self> {
         let plan = self.plan.with_param_values(param_values)?;
         Ok(Self::new(self.session_state, plan))
@@ -1060,8 +1088,10 @@ impl DataFrame {
     /// ```
     pub async fn cache(self) -> Result<DataFrame> {
         let context = SessionContext::with_state(self.session_state.clone());
+        // collect_partitioned 已经产生了结果集    所以可以作为一个内存表
         let mem_table = MemTable::try_new(
             SchemaRef::from(self.schema().clone()),
+            // 执行内部plan 将结果分区
             self.collect_partitioned().await?,
         )?;
 
@@ -1100,6 +1130,7 @@ impl TableProvider for DataFrameTableProvider {
         TableType::View
     }
 
+    // 从表中查询数据
     async fn scan(
         &self,
         state: &SessionState,
@@ -1122,6 +1153,7 @@ impl TableProvider for DataFrameTableProvider {
             expr = expr.limit(0, Some(l))?
         }
         let plan = expr.build()?;
+        // 生成物理计划
         state.create_physical_plan(&plan).await
     }
 }

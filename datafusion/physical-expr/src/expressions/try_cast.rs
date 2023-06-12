@@ -35,7 +35,7 @@ use datafusion_expr::ColumnarValue;
 pub struct TryCastExpr {
     /// The expression to cast
     expr: Arc<dyn PhysicalExpr>,
-    /// The data type to cast to
+    /// The data type to cast to    转换的目标类型
     cast_type: DataType,
 }
 
@@ -68,6 +68,7 @@ impl PhysicalExpr for TryCastExpr {
         self
     }
 
+    /// 返回的是结果类型
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
         Ok(self.cast_type.clone())
     }

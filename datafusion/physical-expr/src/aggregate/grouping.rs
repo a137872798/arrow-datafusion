@@ -55,6 +55,7 @@ impl Grouping {
     }
 }
 
+// 无法获取聚合器 那么定义出来的意义是？
 impl AggregateExpr for Grouping {
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
@@ -69,6 +70,7 @@ impl AggregateExpr for Grouping {
         ))
     }
 
+    // 仅有一个状态字段
     fn state_fields(&self) -> Result<Vec<Field>> {
         Ok(vec![Field::new(
             format_state_name(&self.name, "grouping"),
@@ -81,6 +83,7 @@ impl AggregateExpr for Grouping {
         vec![self.expr.clone()]
     }
 
+    // Grouping 竟然没有聚合器
     fn create_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         Err(DataFusionError::NotImplemented(
             "physical plan is not yet implemented for GROUPING aggregate function"

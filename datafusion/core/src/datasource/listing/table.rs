@@ -59,10 +59,12 @@ use super::PartitionedFile;
 use super::helpers::{expr_applicable_for_cols, pruned_partition_list, split_files};
 
 /// Configuration for creating a [`ListingTable`]
+/// 该配置与ListingTable相关
 #[derive(Debug, Clone)]
 pub struct ListingTableConfig {
     /// Paths on the `ObjectStore` for creating `ListingTable`.
     /// They should share the same schema and object store.
+    // 这个不是表结构 而是指表数据 数据文件可能以分区方式存储在不同目录下 所有数据文件的总和才是这张表
     pub table_paths: Vec<ListingTableUrl>,
     /// Optional `SchemaRef` for the to be created `ListingTable`.
     pub file_schema: Option<SchemaRef>,
@@ -113,6 +115,7 @@ impl ListingTableConfig {
         }
     }
 
+    /// 解析路径 判断文件类型
     fn infer_format(path: &str) -> Result<(Arc<dyn FileFormat>, String)> {
         let err_msg = format!("Unable to infer file type from path: {path}");
 
@@ -120,16 +123,20 @@ impl ListingTableConfig {
 
         let mut splitted = exts.next().unwrap_or("");
 
+        // 先判断文件是否时压缩文件
         let file_compression_type = FileCompressionType::from_str(splitted)
             .unwrap_or(FileCompressionType::UNCOMPRESSED);
 
+        // 压缩文件的情况 获取下一部分
         if file_compression_type.is_compressed() {
             splitted = exts.next().unwrap_or("");
         }
 
+        // 根据后缀名找到匹配的文件类型
         let file_type = FileType::from_str(splitted)
             .map_err(|_| DataFusionError::Internal(err_msg.to_owned()))?;
 
+        // 只有某些文件可以压缩  这里是做检测  可能是比如json.gz 代表需要先解压
         let ext = file_type
             .get_ext_with_compression(file_compression_type.to_owned())
             .map_err(|_| DataFusionError::Internal(err_msg))?;
@@ -149,6 +156,7 @@ impl ListingTableConfig {
     }
 
     /// Infer `ListingOptions` based on `table_path` suffix.
+    /// 因为认为这些数据文件对应的是一个表
     pub async fn infer_options(self, state: &SessionState) -> Result<Self> {
         let store = state
             .runtime_env()
@@ -166,6 +174,7 @@ impl ListingTableConfig {
         let (format, file_extension) =
             ListingTableConfig::infer_format(file.location.as_ref())?;
 
+        // options中 包含了文件后缀名 是否分区
         let listing_options = ListingOptions::new(format)
             .with_file_extension(file_extension)
             .with_target_partitions(state.config().target_partitions());
@@ -178,6 +187,7 @@ impl ListingTableConfig {
     }
 
     /// Infer the [`SchemaRef`] based on `table_path` suffix.  Requires `self.options` to be set prior to using.
+    /// 推断schema信息  因为文件中包含了表结构信息
     pub async fn infer_schema(self, state: &SessionState) -> Result<Self> {
         match self.options {
             Some(options) => {
@@ -428,18 +438,20 @@ impl ListingOptions {
     /// This method will not be called by the table itself but before creating it.
     /// This way when creating the logical plan we can decide to resolve the schema
     /// locally or ask a remote service to do it (e.g a scheduler).
-    pub async fn infer_schema<'a>(
+    pub async fn infer_schema<'a>(  // 传入会话状态和文件路径 解析出schema
         &'a self,
         state: &SessionState,
         table_path: &'a ListingTableUrl,
     ) -> Result<SchemaRef> {
         let store = state.runtime_env().object_store(table_path)?;
 
+        // 找到后缀名匹配的所有文件
         let files: Vec<_> = table_path
             .list_all_files(store.as_ref(), &self.file_extension)
             .try_collect()
             .await?;
 
+        // 这些文件在合并后只会得到一个schema
         self.format.infer_schema(state, &store, &files).await
     }
 }
@@ -448,11 +460,13 @@ impl ListingOptions {
 /// Cache is invalided when file size or last modification has changed
 #[derive(Default)]
 struct StatisticsCache {
+    // Path就是ObjectMeta的path 然后Statistics是该对象相关的统计数据
     statistics: DashMap<Path, (ObjectMeta, Statistics)>,
 }
 
 impl StatisticsCache {
     /// Get `Statistics` for file location. Returns None if file has changed or not found.
+    /// 找到某个数据文件的统计信息 所有数据文件的总和就是这张表
     fn get(&self, meta: &ObjectMeta) -> Option<Statistics> {
         self.statistics
             .get(&meta.location)
@@ -542,6 +556,7 @@ impl StatisticsCache {
 /// # Ok(())
 /// # }
 /// ```
+/// ListingTable 实际上只对标一个表
 pub struct ListingTable {
     table_paths: Vec<ListingTableUrl>,
     /// File fields only
@@ -549,7 +564,9 @@ pub struct ListingTable {
     /// File fields + partition columns
     table_schema: SchemaRef,
     options: ListingOptions,
+    /// 建表语句
     definition: Option<String>,
+    /// 有关每个数据文件的统计信息
     collected_statistics: StatisticsCache,
     infinite_source: bool,
 }
@@ -564,8 +581,9 @@ impl ListingTable {
     /// If the schema is provided then it must be resolved before creating the table
     /// and should contain the fields of the file without the table
     /// partitioning columns.
-    ///
+    /// 基于配置初始化
     pub fn try_new(config: ListingTableConfig) -> Result<Self> {
+        // 从factory中可以发现 这个应该是不包含分区键的
         let file_schema = config
             .file_schema
             .ok_or_else(|| DataFusionError::Internal("No schema provided.".into()))?;
@@ -576,9 +594,13 @@ impl ListingTable {
 
         // Add the partition columns to the file schema
         let mut builder = SchemaBuilder::from(file_schema.fields());
+
+        // 描述分区的列 追加进去
         for (part_col_name, part_col_type) in &options.table_partition_cols {
             builder.push(Field::new(part_col_name, part_col_type.clone(), false));
         }
+
+        // 默认为false
         let infinite_source = options.infinite_source;
 
         let table = Self {
@@ -620,12 +642,16 @@ impl ListingTable {
             };
 
         // convert each expr to a physical sort expr
+        // 可以设置排序键
         let sort_exprs = file_sort_order
             .iter()
             .map(|expr| {
+                // 代表基于某列排序
                 if let Expr::Sort(Sort { expr, asc, nulls_first }) = expr {
                     if let Expr::Column(col) = expr.as_ref() {
                         let expr = physical_plan::expressions::col(&col.name, self.table_schema.as_ref())?;
+
+                        // 转换成物理排序计划
                         Ok(PhysicalSortExpr {
                             expr,
                             options: SortOptions {
@@ -665,20 +691,25 @@ impl TableProvider for ListingTable {
         TableType::Base
     }
 
+    // 根据条件查询
     async fn scan(
         &self,
         state: &SessionState,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&Vec<usize>>,  // 代表需要查询哪些列
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+
+        // 已经基于filter进行过滤  根据limit限制文件数量  并按照分区数进行分组了  statistics是被选中文件的统计信息
         let (partitioned_file_lists, statistics) =
             self.list_files_for_scan(state, filters, limit).await?;
 
         // if no files need to be read, return an `EmptyExec`
         if partitioned_file_lists.is_empty() {
             let schema = self.schema();
+            // 根据需要的字段 产生一个新的schema
             let projected_schema = project_schema(&schema, projection)?;
+            // 因为没数据 产生一个空的执行计划
             return Ok(Arc::new(EmptyExec::new(false, projected_schema)));
         }
 
@@ -698,9 +729,12 @@ impl TableProvider for ListingTable {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // 将多个过滤器结合起来
         let filters = if let Some(expr) = conjunction(filters.to_vec()) {
             // NOTE: Use the table schema (NOT file schema) here because `expr` may contain references to partition columns.
             let table_df_schema = self.table_schema.as_ref().clone().to_dfschema()?;
+
+            // 创建物理expr  一整套处理流程可能会涉及多个环节 每个环节就是一个expr
             let filters = create_physical_expr(
                 &expr,
                 &table_df_schema,
@@ -713,14 +747,16 @@ impl TableProvider for ListingTable {
         };
 
         // create the execution plan
+        // 基于filter生成执行计划   如何生成跟文件格式有关
         self.options
             .format
             .create_physical_plan(
                 state,
+                // 描述如何扫描文件 (包括文件从哪加载)
                 FileScanConfig {
                     object_store_url: self.table_paths.get(0).unwrap().object_store(),
                     file_schema: Arc::clone(&self.file_schema),
-                    file_groups: partitioned_file_lists,
+                    file_groups: partitioned_file_lists,  // 从这些文件中检索
                     statistics,
                     projection: projection.cloned(),
                     limit,
@@ -733,10 +769,12 @@ impl TableProvider for ListingTable {
             .await
     }
 
+    // 描述表达式能否作用在表上
     fn supports_filter_pushdown(
         &self,
         filter: &Expr,
     ) -> Result<TableProviderFilterPushDown> {
+        // 判断表达式能否作用在分区键上
         if expr_applicable_for_cols(
             &self
                 .options
@@ -764,10 +802,11 @@ impl ListingTable {
     /// Get the list of files for a scan as well as the file level statistics.
     /// The list is grouped to let the execution plan know how the files should
     /// be distributed to different threads / executors.
+    /// 查询会涉及到所有数据文件
     async fn list_files_for_scan<'a>(
         &'a self,
         ctx: &'a SessionState,
-        filters: &'a [Expr],
+        filters: &'a [Expr],  // 过滤数据集的表达式
         limit: Option<usize>,
     ) -> Result<(Vec<Vec<PartitionedFile>>, Statistics)> {
         let store = ctx
@@ -775,6 +814,7 @@ impl ListingTable {
             .object_store(self.table_paths.get(0).unwrap())?;
         // list files (with partitions)
         let file_list = future::try_join_all(self.table_paths.iter().map(|table_path| {
+            // 通过分区键处理后 得到被分区的数据文件
             pruned_partition_list(
                 store.as_ref(),
                 table_path,
@@ -788,15 +828,20 @@ impl ListingTable {
         let file_list = stream::iter(file_list).flatten();
 
         // collect the statistics if required by the config
+        // 遍历过滤后保留下来的每个数据文件
         let files = file_list.then(|part_file| async {
             let part_file = part_file?;
+
+            // 要进行一些数据统计
             let statistics = if self.options.collect_stat {
                 match self.collected_statistics.get(&part_file.object_meta) {
+                    // 已经有统计数据了 如果文件发生改动 也会返回None
                     Some(statistics) => statistics,
                     None => {
                         let statistics = self
                             .options
                             .format
+                            // 产生统计数据
                             .infer_stats(
                                 ctx,
                                 &store,
@@ -815,10 +860,12 @@ impl ListingTable {
             Ok((part_file, statistics)) as Result<(PartitionedFile, Statistics)>
         });
 
+        // 基于limit 产生统计数据
         let (files, statistics) =
             get_statistics_with_limit(files, self.schema(), limit).await?;
 
         Ok((
+            // 将结果按照target_partitions数进行分组
             split_files(files, self.options.target_partitions),
             statistics,
         ))

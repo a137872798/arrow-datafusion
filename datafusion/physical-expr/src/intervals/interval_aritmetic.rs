@@ -32,6 +32,7 @@ use crate::aggregate::min_max::{max, min};
 /// This type represents a single endpoint of an [`Interval`]. An endpoint can
 /// be open or closed, denoting whether the interval includes or excludes the
 /// endpoint itself.
+/// 代表一个值范围
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntervalBound {
     pub value: ScalarValue,
@@ -75,8 +76,10 @@ impl IntervalBound {
     /// The result is unbounded if either is; otherwise, their values are
     /// added. The result is closed if both original bounds are closed, or open
     /// otherwise.
+    /// 合并2个边界
     pub fn add<T: Borrow<IntervalBound>>(&self, other: T) -> Result<IntervalBound> {
         let rhs = other.borrow();
+        // 与无界合并后 就会变成无界
         if self.is_unbounded() || rhs.is_unbounded() {
             IntervalBound::make_unbounded(coerce_types(
                 &self.get_datatype(),
@@ -96,6 +99,7 @@ impl IntervalBound {
     /// or open otherwise.
     pub fn sub<T: Borrow<IntervalBound>>(&self, other: T) -> Result<IntervalBound> {
         let rhs = other.borrow();
+        // 无界 减了还是无界
         if self.is_unbounded() || rhs.is_unbounded() {
             IntervalBound::make_unbounded(coerce_types(
                 &self.get_datatype(),
@@ -118,11 +122,13 @@ impl IntervalBound {
         second: &IntervalBound,
         decide: fn(&ScalarValue, &ScalarValue) -> Result<ScalarValue>,
     ) -> Result<IntervalBound> {
+        // 首先一旦出现无界的  就放弃
         Ok(if first.is_unbounded() {
             second.clone()
         } else if second.is_unbounded() {
             first.clone()
         } else if first.value != second.value {
+            // 通过函数确定使用哪个边界
             let chosen = decide(&first.value, &second.value)?;
             if chosen.eq(&first.value) {
                 first.clone()
@@ -146,6 +152,7 @@ impl Display for IntervalBound {
 /// subtraction, but more capabilities will be added in the future.
 /// Upper/lower bounds having NULL values indicate an unbounded side. For
 /// example; [10, 20], [10, ∞), (-∞, 100] and (-∞, ∞) are all valid intervals.
+/// 描述一个区间  开闭区间都有可能
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interval {
     pub lower: IntervalBound,
@@ -177,8 +184,10 @@ impl Interval {
     /// equivalent to having a true closed upper bound. Therefore; input
     /// parameters to construct an Interval can have different types, but they
     /// all result in [false, false], [false, true] or [true, true].
+    /// 将上下限组合 变成一个Interval
     pub fn new(lower: IntervalBound, upper: IntervalBound) -> Interval {
         // Boolean intervals need a special handling.
+        // 布尔类型需要特殊处理 其他类型直接返回即可
         if let ScalarValue::Boolean(_) = lower.value {
             let standardized_lower = match lower.value {
                 ScalarValue::Boolean(None) if lower.open => {
@@ -221,6 +230,7 @@ impl Interval {
     }
 
     /// Casts this interval to `data_type` using `cast_options`.
+    /// 对上下限 进行类型转换
     pub(crate) fn cast_to(
         &self,
         data_type: &DataType,
@@ -233,6 +243,7 @@ impl Interval {
 
     /// This function returns the data type of this interval. If both endpoints
     /// do not have the same data type, returns an error.
+    /// 默认上下限的类型是一致的
     pub(crate) fn get_datatype(&self) -> Result<DataType> {
         let lower_type = self.lower.get_datatype();
         let upper_type = self.upper.get_datatype();

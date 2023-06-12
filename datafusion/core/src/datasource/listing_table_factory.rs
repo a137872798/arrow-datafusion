@@ -39,6 +39,7 @@ use crate::datasource::TableProvider;
 use crate::execution::context::SessionState;
 
 /// A `TableProviderFactory` capable of creating new `ListingTable`s
+/// 用于产生ListingTable
 pub struct ListingTableFactory {}
 
 impl ListingTableFactory {
@@ -56,16 +57,22 @@ impl Default for ListingTableFactory {
 
 #[async_trait]
 impl TableProviderFactory for ListingTableFactory {
+
+    // 在本地维护一张新表
     async fn create(
         &self,
         state: &SessionState,
-        cmd: &CreateExternalTable,
+        cmd: &CreateExternalTable,  // 描述如何生成表
     ) -> datafusion_common::Result<Arc<dyn TableProvider>> {
+
+        // 指定文件压缩方式  因为数据文件支持压缩
         let file_compression_type = FileCompressionType::from(cmd.file_compression_type);
+        // 数据文件类型必须有效
         let file_type = FileType::from_str(cmd.file_type.as_str()).map_err(|_| {
             DataFusionError::Execution(format!("Unknown FileType {}", cmd.file_type))
         })?;
 
+        // 得到文件拓展名 (需要加上压缩类型)  parquet不支持压缩  返回的拓展名还是.parquet
         let file_extension =
             file_type.get_ext_with_compression(file_compression_type.to_owned())?;
 
@@ -83,9 +90,11 @@ impl TableProviderFactory for ListingTableFactory {
             ),
         };
 
+        // 描述表有哪些列
         let (provided_schema, table_partition_cols) = if cmd.schema.fields().is_empty() {
             (
                 None,
+                // 遍历分区键
                 cmd.table_partition_cols
                     .iter()
                     .map(|x| {
@@ -101,31 +110,39 @@ impl TableProviderFactory for ListingTableFactory {
             )
         } else {
             let schema: SchemaRef = Arc::new(cmd.schema.as_ref().to_owned().into());
+
+            // 将分区列的类型，名称提取出来
             let table_partition_cols = cmd
                 .table_partition_cols
                 .iter()
                 .map(|col| {
+                    // 从schema中获取field信息
                     schema
                         .field_with_name(col)
                         .map_err(DataFusionError::ArrowError)
                 })
                 .collect::<datafusion_common::Result<Vec<_>>>()?
                 .into_iter()
+                // 从field中抽取 name/data_type信息
                 .map(|f| (f.name().to_owned(), f.data_type().to_owned()))
                 .collect();
             // exclude partition columns to support creating partitioned external table
             // with a specified column definition like
             // `create external table a(c0 int, c1 int) stored as csv partitioned by (c1)...`
+            // 保存非分区键的下标
             let mut project_idx = Vec::new();
             for i in 0..schema.fields().len() {
                 if !cmd.table_partition_cols.contains(schema.field(i).name()) {
                     project_idx.push(i);
                 }
             }
+
+            // 排除掉分区键后 产生一个schema
             let schema = Arc::new(schema.project(&project_idx)?);
             (Some(schema), table_partition_cols)
         };
 
+        // 获取排序相关的expr
         let file_sort_order = if cmd.order_exprs.is_empty() {
             None
         } else {
@@ -133,17 +150,22 @@ impl TableProviderFactory for ListingTableFactory {
         };
 
         let options = ListingOptions::new(file_format)
+            // 是否要在操作表的同时生成统计信息
             .with_collect_stat(state.config().collect_statistics())
             .with_file_extension(file_extension)
             .with_target_partitions(state.config().target_partitions())
             .with_table_partition_cols(table_partition_cols)
             .with_file_sort_order(file_sort_order);
 
+        // 产生存储数据文件的目录路径
         let table_path = ListingTableUrl::parse(&cmd.location)?;
+
+        // 如果参数中没有提供schema信息 会自行推断
         let resolved_schema = match provided_schema {
             None => options.infer_schema(state, &table_path).await?,
             Some(s) => s,
         };
+        // 填充配置项
         let config = ListingTableConfig::new(table_path)
             .with_listing_options(options)
             .with_schema(resolved_schema);

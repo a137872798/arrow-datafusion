@@ -28,6 +28,7 @@ use crate::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservatio
 use arrow::record_batch::RecordBatch;
 
 /// Wraps a [`BaselineMetrics`] and records memory usage on a [`MemoryReservation`]
+/// 追加一个可以记录内存消耗的对象
 #[derive(Debug)]
 pub struct MemTrackingMetrics {
     reservation: MemoryReservation,
@@ -65,6 +66,7 @@ impl MemTrackingMetrics {
     /// setup initial memory usage and register it with memory manager
     pub fn init_mem_used(&mut self, size: usize) {
         self.metrics.mem_used().set(size);
+        // 设置内存开销
         self.reservation.resize(size)
     }
 

@@ -28,7 +28,7 @@ use datafusion_expr::Accumulator;
 use std::any::Any;
 use std::sync::Arc;
 
-/// ARRAY_AGG aggregate expression
+/// ARRAY_AGG aggregate expression  这个叫聚合数组  调用聚合函数后 会将值追加到一个vec中
 #[derive(Debug)]
 pub struct ArrayAgg {
     name: String,
@@ -57,6 +57,7 @@ impl AggregateExpr for ArrayAgg {
     }
 
     fn field(&self) -> Result<Field> {
+        // 结果是一个列表类型 其中每项都是input_data_type类型
         Ok(Field::new_list(
             &self.name,
             Field::new("item", self.input_data_type.clone(), true),
@@ -73,6 +74,7 @@ impl AggregateExpr for ArrayAgg {
     fn state_fields(&self) -> Result<Vec<Field>> {
         Ok(vec![Field::new_list(
             format_state_name(&self.name, "array_agg"),
+            // 代表每项的类型
             Field::new("item", self.input_data_type.clone(), true),
             false,
         )])
@@ -117,6 +119,8 @@ impl ArrayAggAccumulator {
 }
 
 impl Accumulator for ArrayAggAccumulator {
+
+    // 通过一组新的值来更新
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         if values.is_empty() {
             return Ok(());
@@ -124,12 +128,14 @@ impl Accumulator for ArrayAggAccumulator {
         assert!(values.len() == 1, "array_agg can only take 1 param!");
         let arr = &values[0];
         (0..arr.len()).try_for_each(|index| {
+            // 取出arr[index]的值   实际上也就是把所有值挨个加入到vec中
             let scalar = ScalarValue::try_from_array(arr, index)?;
             self.values.push(scalar);
             Ok(())
         })
     }
 
+    // 基于另一个同类对象的状态来进行合并
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
         if states.is_empty() {
             return Ok(());
@@ -153,6 +159,7 @@ impl Accumulator for ArrayAggAccumulator {
         Ok(vec![self.evaluate()?])
     }
 
+    // 返回一组值
     fn evaluate(&self) -> Result<ScalarValue> {
         Ok(ScalarValue::new_list(
             Some(self.values.clone()),

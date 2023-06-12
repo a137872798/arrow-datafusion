@@ -40,10 +40,11 @@ use crate::{expressions::PhysicalSortExpr, AggregateExpr, PhysicalExpr};
 /// e.g cumulative window frames uses `PlainAggregateWindowExpr`. Where as Aggregate Window Expressions
 /// that have the form `OVER({ROWS | RANGE| GROUPS} BETWEEN M {PRECEDING| FOLLOWING} AND ...)`
 /// e.g sliding window frames uses `SlidingAggregateWindowExpr`.
+/// 当window_frame.start_bound 有界时 生成该对象
 #[derive(Debug)]
 pub struct SlidingAggregateWindowExpr {
-    aggregate: Arc<dyn AggregateExpr>,
-    partition_by: Vec<Arc<dyn PhysicalExpr>>,
+    aggregate: Arc<dyn AggregateExpr>,  // 物理聚合表达式 内部包含累加器 以及包含累加逻辑
+    partition_by: Vec<Arc<dyn PhysicalExpr>>,  // 这组表达式是有关结果集如何分区的 (猜测每个physicalExpr应该对应一个column)
     order_by: Vec<PhysicalSortExpr>,
     window_frame: Arc<WindowFrame>,
 }
@@ -80,6 +81,7 @@ impl WindowExpr for SlidingAggregateWindowExpr {
         self
     }
 
+    /// 描述聚合后的结果
     fn field(&self) -> Result<Field> {
         self.aggregate.field()
     }
@@ -88,14 +90,17 @@ impl WindowExpr for SlidingAggregateWindowExpr {
         self.aggregate.name()
     }
 
+    /// 可以产生参数的表达式
     fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>> {
         self.aggregate.expressions()
     }
 
+    /// 通过该方法后  会基于聚合函数计算出每个窗口的数据
     fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
         self.aggregate_evaluate(batch)
     }
 
+    /// 上次的状态+本次处理结果才是最终结果
     fn evaluate_stateful(
         &self,
         partition_batches: &PartitionBatches,
@@ -116,6 +121,7 @@ impl WindowExpr for SlidingAggregateWindowExpr {
         &self.window_frame
     }
 
+    /// TODO 不重要
     fn get_reverse_expr(&self) -> Option<Arc<dyn WindowExpr>> {
         self.aggregate.reverse_expr().map(|reverse_expr| {
             let reverse_window_frame = self.window_frame.reverse();
@@ -144,12 +150,15 @@ impl WindowExpr for SlidingAggregateWindowExpr {
 }
 
 impl AggregateWindowExpr for SlidingAggregateWindowExpr {
+
+    /// 这里返回的是滑动累加器
     fn get_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         self.aggregate.create_sliding_accumulator()
     }
 
     /// Given current range and the last range, calculates the accumulator
     /// result for the range of interest.
+    /// 将需要聚合的相关列 通过该方法计算出结果值
     fn get_aggregate_result_inside_range(
         &self,
         last_range: &Range<usize>,
@@ -157,6 +166,7 @@ impl AggregateWindowExpr for SlidingAggregateWindowExpr {
         value_slice: &[ArrayRef],
         accumulator: &mut Box<dyn Accumulator>,
     ) -> Result<ScalarValue> {
+        // range为空 返回空数据
         if cur_range.start == cur_range.end {
             // We produce None if the window is empty.
             ScalarValue::try_from(self.aggregate.field()?.data_type())
@@ -168,9 +178,10 @@ impl AggregateWindowExpr for SlidingAggregateWindowExpr {
                     .iter()
                     .map(|v| v.slice(last_range.end, update_bound))
                     .collect();
+                // 使用累加器聚合数据
                 accumulator.update_batch(&update)?
             }
-            // Remove rows that have now left the window:
+            // Remove rows that have now left the window:  这里体现出滑动了  将start部分的影响抹掉了
             let retract_bound = cur_range.start - last_range.start;
             if retract_bound > 0 {
                 let retract: Vec<ArrayRef> = value_slice

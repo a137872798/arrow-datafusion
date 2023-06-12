@@ -263,6 +263,7 @@ pub fn grouping_set_to_exprlist(group_expr: &[Expr]) -> Result<Vec<Expr>> {
 
 /// Recursively walk an expression tree, collecting the unique set of columns
 /// referenced in the expression
+/// 收集表达式中用到的所有列
 pub fn expr_to_columns(expr: &Expr, accum: &mut HashSet<Column>) -> Result<()> {
     inspect_expr_pre(expr, |expr| {
         match expr {
@@ -317,12 +318,16 @@ pub fn expr_to_columns(expr: &Expr, accum: &mut HashSet<Column>) -> Result<()> {
 }
 
 /// Resolves an `Expr::Wildcard` to a collection of `Expr::Column`'s.
+/// 将通配符转换成可能关联的所有列
 pub fn expand_wildcard(schema: &DFSchema, plan: &LogicalPlan) -> Result<Vec<Expr>> {
+
+    // 仅针对join类型 返回join用到的所有列
     let using_columns = plan.using_columns()?;
     let columns_to_skip = using_columns
         .into_iter()
         // For each USING JOIN condition, only expand to one of each join column in projection
         .flat_map(|cols| {
+            // 遍历每个连接组
             let mut cols = cols.into_iter().collect::<Vec<_>>();
             // sort join columns to make sure we consistently keep the same
             // qualified column
@@ -341,6 +346,7 @@ pub fn expand_wildcard(schema: &DFSchema, plan: &LogicalPlan) -> Result<Vec<Expr
         })
         .collect::<HashSet<_>>();
 
+    // 默认就是返回schema下的所有field
     if columns_to_skip.is_empty() {
         Ok(schema
             .fields()
@@ -353,6 +359,7 @@ pub fn expand_wildcard(schema: &DFSchema, plan: &LogicalPlan) -> Result<Vec<Expr
             .iter()
             .filter_map(|f| {
                 let col = f.qualified_column();
+                // 忽略join相关的字段
                 if !columns_to_skip.contains(&col) {
                     Some(Expr::Column(col))
                 } else {
@@ -364,9 +371,10 @@ pub fn expand_wildcard(schema: &DFSchema, plan: &LogicalPlan) -> Result<Vec<Expr
 }
 
 /// Resolves an `Expr::Wildcard` to a collection of qualified `Expr::Column`'s.
+/// 展开某个表的通配符
 pub fn expand_qualified_wildcard(
     qualifier: &str,
-    schema: &DFSchema,
+    schema: &DFSchema,  // 该schema可能是聚合了多个table下的col  所以要用表名选出相关的col
 ) -> Result<Vec<Expr>> {
     let qualifier = TableReference::from(qualifier);
     let qualified_fields: Vec<DFField> = schema
@@ -391,17 +399,21 @@ pub fn expand_qualified_wildcard(
 
 /// (expr, "is the SortExpr for window (either comes from PARTITION BY or ORDER BY columns)")
 /// if bool is true SortExpr comes from `PARTITION BY` column, if false comes from `ORDER BY` column
+/// 表示窗口函数的排序键   v2为true 代表该键是分区键  false 代表只是排序键
 type WindowSortKey = Vec<(Expr, bool)>;
 
 /// Generate a sort key for a given window expr's partition_by and order_bu expr
+/// 决定了数据如何排序
 pub fn generate_sort_key(
     partition_by: &[Expr],
     order_by: &[Expr],
 ) -> Result<WindowSortKey> {
+    // 标准化为 asc:true nulls_first:false
     let normalized_order_by_keys = order_by
         .iter()
         .map(|e| match e {
             Expr::Sort(Sort { expr, .. }) => {
+                // Sort中有排序列
                 Ok(Expr::Sort(Sort::new(expr.clone(), true, false)))
             }
             _ => Err(DataFusionError::Plan(
@@ -412,28 +424,35 @@ pub fn generate_sort_key(
 
     let mut final_sort_keys = vec![];
     let mut is_partition_flag = vec![];
+
     partition_by.iter().for_each(|e| {
         // By default, create sort key with ASC is true and NULLS LAST to be consistent with
         // PostgreSQL's rule: https://www.postgresql.org/docs/current/queries-order.html
+        // 分区键也套一层排序 asc:true nulls_first:false
         let e = e.clone().sort(true, false);
+        // 找到与分区键一样的排序键
         if let Some(pos) = normalized_order_by_keys.iter().position(|key| key.eq(&e)) {
             let order_by_key = &order_by[pos];
             if !final_sort_keys.contains(order_by_key) {
                 final_sort_keys.push(order_by_key.clone());
+                // 就是说该order_by同时也是分区键的意思么
                 is_partition_flag.push(true);
             }
         } else if !final_sort_keys.contains(&e) {
+            // 插入剩下的分区键
             final_sort_keys.push(e);
             is_partition_flag.push(true);
         }
     });
 
     order_by.iter().for_each(|e| {
+        // 插入剩余的orderBy
         if !final_sort_keys.contains(e) {
             final_sort_keys.push(e.clone());
             is_partition_flag.push(false);
         }
     });
+    // 此时分区键在前 排序键在后
     let res = final_sort_keys
         .into_iter()
         .zip(is_partition_flag)
@@ -507,22 +526,28 @@ pub fn compare_sort_expr(
 }
 
 /// group a slice of window expression expr by their order by expressions
+/// 对窗口表达式分组
 pub fn group_window_expr_by_sort_keys(
     window_expr: &[Expr],
 ) -> Result<Vec<(WindowSortKey, Vec<&Expr>)>> {
     let mut result = vec![];
+
     window_expr.iter().try_for_each(|expr| match expr {
         Expr::WindowFunction(WindowFunction{ partition_by, order_by, .. }) => {
+            // 产生排序键
             let sort_key = generate_sort_key(partition_by, order_by)?;
             if let Some((_, values)) = result.iter_mut().find(
                 |group: &&mut (WindowSortKey, Vec<&Expr>)| matches!(group, (key, _) if *key == sort_key),
             ) {
+                // 针对使用相同分区键的窗口表达式   存储在一个容器中
                 values.push(expr);
             } else {
+                // 首次添加
                 result.push((sort_key, vec![expr]))
             }
             Ok(())
         }
+        // 这些表达式必须是window表达式
         other => Err(DataFusionError::Internal(format!(
             "Impossibly got non-window expr {other:?}",
         ))),
@@ -649,6 +674,7 @@ where
 /// // create new plan using rewritten_exprs in same position
 /// let new_plan = from_plan(&plan, rewritten_exprs, new_inputs);
 /// ```
+/// 替换内部的执行计划  生成新的计划
 pub fn from_plan(
     plan: &LogicalPlan,
     expr: &[Expr],
@@ -956,6 +982,7 @@ pub fn from_plan(
 }
 
 /// Find all columns referenced from an aggregate query
+/// 返回聚合函数会用到的所有col
 fn agg_cols(agg: &Aggregate) -> Result<Vec<Column>> {
     Ok(agg
         .aggr_expr
@@ -965,19 +992,23 @@ fn agg_cols(agg: &Aggregate) -> Result<Vec<Column>> {
         .collect())
 }
 
+/// 将exprs 转换成field
 fn exprlist_to_fields_aggregate(
     exprs: &[Expr],
     plan: &LogicalPlan,
     agg: &Aggregate,
 ) -> Result<Vec<DFField>> {
+    // 得到聚合函数会使用到的所有col
     let agg_cols = agg_cols(agg)?;
     let mut fields = vec![];
     for expr in exprs {
         match expr {
             Expr::Column(c) if agg_cols.iter().any(|x| x == c) => {
                 // resolve against schema of input to aggregate
+                // 因为在聚合函数中被使用  所以schema是根据聚合函数的
                 fields.push(expr.to_field(agg.input.schema())?);
             }
+            // 其余情况使用plan的schema
             _ => fields.push(expr.to_field(plan.schema())?),
         }
     }
@@ -985,9 +1016,10 @@ fn exprlist_to_fields_aggregate(
 }
 
 /// Create field meta-data from an expression, for use in a result set schema
+/// 将expr可能会用到的所有field记录下来
 pub fn exprlist_to_fields<'a>(
     expr: impl IntoIterator<Item = &'a Expr>,
-    plan: &LogicalPlan,
+    plan: &LogicalPlan,  // 对应原始逻辑计划
 ) -> Result<Vec<DFField>> {
     let exprs: Vec<Expr> = expr.into_iter().cloned().collect();
     // when dealing with aggregate plans we cannot simply look in the aggregate output schema
@@ -995,6 +1027,7 @@ pub fn exprlist_to_fields<'a>(
     // `GROUPING(person.state)` so in order to resolve `person.state` in this case we need to
     // look at the input to the aggregate instead.
     let fields = match plan {
+        // 抽取出聚合表达式用到的所有col + expr用到的col
         LogicalPlan::Aggregate(agg) => {
             Some(exprlist_to_fields_aggregate(&exprs, plan, agg))
         }
@@ -1006,11 +1039,14 @@ pub fn exprlist_to_fields<'a>(
         },
         _ => None,
     };
+
+    // 不是聚合函数和窗口函数的情况下 fields为None
     if let Some(fields) = fields {
         fields
     } else {
         // look for exact match in plan's output schema
         let input_schema = &plan.schema();
+        // 收集表达式会用到的所有field
         exprs.iter().map(|e| e.to_field(input_schema)).collect()
     }
 }
@@ -1067,6 +1103,7 @@ pub fn find_column_exprs(exprs: &[Expr]) -> Vec<Expr> {
         .collect()
 }
 
+// 找到表达式使用到的col
 pub(crate) fn find_columns_referenced_by_expr(e: &Expr) -> Vec<Column> {
     let mut exprs = vec![];
     inspect_expr_pre(e, |expr| {
@@ -1177,7 +1214,7 @@ pub fn check_all_columns_from_schema(
 ///    all referenced column of the right side is from the right schema.
 /// 2. Or opposite. All referenced column of the left side is from the right schema,
 ///    and the right side is from the left schema.
-///
+/// 校验返回有效的join对
 pub fn find_valid_equijoin_key_pair(
     left_key: &Expr,
     right_key: &Expr,
@@ -1187,16 +1224,19 @@ pub fn find_valid_equijoin_key_pair(
     let left_using_columns = left_key.to_columns()?;
     let right_using_columns = right_key.to_columns()?;
 
-    // Conditions like a = 10, will be added to non-equijoin.
+    // Conditions like a = 10, will be added to non-equijoin.  不需要校验 直接返回OK
     if left_using_columns.is_empty() || right_using_columns.is_empty() {
         return Ok(None);
     }
 
+    // 要求join左侧的字段要出现在左表中
     let l_is_left =
         check_all_columns_from_schema(&left_using_columns, left_schema.clone())?;
+    // 右侧的字段出现在右表
     let r_is_right =
         check_all_columns_from_schema(&right_using_columns, right_schema.clone())?;
 
+    // 或者 右对左  左对右
     let r_is_left_and_l_is_right = || {
         let result =
             check_all_columns_from_schema(&right_using_columns, left_schema.clone())?

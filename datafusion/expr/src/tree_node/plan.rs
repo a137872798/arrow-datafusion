@@ -21,6 +21,7 @@ use crate::LogicalPlan;
 use datafusion_common::tree_node::{TreeNodeVisitor, VisitRecursion};
 use datafusion_common::{tree_node::TreeNode, Result};
 
+// 逻辑计划本身也可以是树形结构
 impl TreeNode for LogicalPlan {
     /// Compared to the default implementation, we need to invoke [`apply_subqueries`]
     /// before visiting its children
@@ -36,6 +37,7 @@ impl TreeNode for LogicalPlan {
             VisitRecursion::Stop => return Ok(VisitRecursion::Stop),
         };
 
+        // 这个是相比多出来的部分
         self.apply_subqueries(op)?;
 
         self.apply_children(&mut |node| node.apply(op))

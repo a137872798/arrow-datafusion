@@ -46,6 +46,7 @@ const NUM_REGISTERS: usize = 1_usize << HLL_P;
 /// Mask to obtain index into the registers
 const HLL_P_MASK: u64 = (NUM_REGISTERS as u64) - 1;
 
+// HyperLogLog 占用内存小 是一个近似值
 #[derive(Clone, Debug)]
 pub(crate) struct HyperLogLog<T>
 where
@@ -74,6 +75,7 @@ where
 {
     /// Creates a new, empty HyperLogLog.
     pub fn new() -> Self {
+        // 初始化的时候 有非常非常多的槽
         let registers = [0; NUM_REGISTERS];
         Self::new_with_registers(registers)
     }
@@ -90,7 +92,7 @@ where
 
     /// choice of hash function: ahash is already an dependency
     /// and it fits the requirements of being a 64bit hash with
-    /// reasonable performance.
+    /// reasonable performance.  计算hash值
     #[inline]
     fn hash_value(&self, obj: &T) -> u64 {
         let mut hasher: AHasher = SEED.build_hasher();
@@ -101,6 +103,7 @@ where
     /// Adds an element to the HyperLogLog.
     pub fn add(&mut self, obj: &T) {
         let hash = self.hash_value(obj);
+        // 找到所在的槽
         let index = (hash & HLL_P_MASK) as usize;
         let p = ((hash >> HLL_P) | (1_u64 << HLL_Q)).trailing_zeros() + 1;
         self.registers[index] = self.registers[index].max(p as u8);

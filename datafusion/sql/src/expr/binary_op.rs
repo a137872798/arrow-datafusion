@@ -21,6 +21,8 @@ use datafusion_expr::{BinaryExpr, Expr, Operator};
 use sqlparser::ast::{BinaryOperator, Expr as SQLExpr};
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 解析二元操作
     pub(crate) fn parse_sql_binary_op(
         &self,
         left: SQLExpr,
@@ -30,6 +32,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         let operator = match op {
+            // 映射成本框架的操作类型
             BinaryOperator::Gt => Ok(Operator::Gt),
             BinaryOperator::GtEq => Ok(Operator::GtEq),
             BinaryOperator::Lt => Ok(Operator::Lt),

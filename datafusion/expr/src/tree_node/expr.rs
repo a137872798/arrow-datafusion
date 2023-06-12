@@ -25,11 +25,15 @@ use crate::Expr;
 use datafusion_common::tree_node::VisitRecursion;
 use datafusion_common::{tree_node::TreeNode, Result};
 
+// 所有表达式作为树节点  连成了整棵树
 impl TreeNode for Expr {
+
+    // op作用到自身后 可能还会作用到每个子节点上
     fn apply_children<F>(&self, op: &mut F) -> Result<VisitRecursion>
     where
         F: FnMut(&Self) -> Result<VisitRecursion>,
     {
+        // 怎么体现子节点呢  不是说每个表达式内部内置了一个list  而是不同种类的表达式内置的方式是不同的
         let children = match self {
             Expr::Alias(expr, _)
             | Expr::Not(expr)
@@ -46,17 +50,23 @@ impl TreeNode for Expr {
             | Expr::TryCast(TryCast { expr, .. })
             | Expr::Sort(Sort { expr, .. })
             | Expr::InSubquery { expr, .. } => vec![expr.as_ref().clone()],
+
+            // 这里忽略了key 只针对内部的表达式进行处理
             Expr::GetIndexedField(GetIndexedField { expr, .. }) => {
                 vec![expr.as_ref().clone()]
             }
             Expr::GroupingSet(GroupingSet::Rollup(exprs))
             | Expr::GroupingSet(GroupingSet::Cube(exprs)) => exprs.clone(),
+
+            // 这些函数的参数是一组表达式
             Expr::ScalarFunction { args, .. } | Expr::ScalarUDF { args, .. } => {
                 args.clone()
             }
             Expr::GroupingSet(GroupingSet::GroupingSets(lists_of_exprs)) => {
                 lists_of_exprs.clone().into_iter().flatten().collect()
             }
+
+            // 这些比较简单的表达式是没有子节点的
             Expr::Column(_)
             // Treat OuterReferenceColumn as a leaf expression
             | Expr::OuterReferenceColumn(_, _)
@@ -67,9 +77,12 @@ impl TreeNode for Expr {
             | Expr::Wildcard
             | Expr::QualifiedWildcard { .. }
             | Expr::Placeholder { .. } => vec![],
+
+            // 二元表达式
             Expr::BinaryExpr(BinaryExpr { left, right, .. }) => {
                 vec![left.as_ref().clone(), right.as_ref().clone()]
             }
+            // 处理目标列以及 匹配的表达式
             Expr::Like(Like { expr, pattern, .. })
             | Expr::ILike(Like { expr, pattern, .. })
             | Expr::SimilarTo(Like { expr, pattern, .. }) => {
@@ -126,8 +139,10 @@ impl TreeNode for Expr {
         };
 
         for child in children.iter() {
+            // 作用到每个子节点上
             match op(child)? {
                 VisitRecursion::Continue => {}
+                // 跳过下面的表达式
                 VisitRecursion::Skip => return Ok(VisitRecursion::Continue),
                 VisitRecursion::Stop => return Ok(VisitRecursion::Stop),
             }
@@ -136,12 +151,14 @@ impl TreeNode for Expr {
         Ok(VisitRecursion::Continue)
     }
 
+    // 要转换每个子表达式
     fn map_children<F>(self, transform: F) -> Result<Self>
     where
         F: FnMut(Self) -> Result<Self>,
     {
         let mut transform = transform;
 
+        // 就是对表达式套壳  也没啥看头
         Ok(match self {
             Expr::Alias(expr, name) => {
                 Expr::Alias(transform_boxed(expr, &mut transform)?, name)
@@ -344,6 +361,7 @@ impl TreeNode for Expr {
     }
 }
 
+// 使用transform处理原表达式后返回
 #[allow(clippy::boxed_local)]
 fn transform_boxed<F>(boxed_expr: Box<Expr>, transform: &mut F) -> Result<Box<Expr>>
 where

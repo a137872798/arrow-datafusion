@@ -26,6 +26,8 @@ use sqlparser::parser::ParserError::ParserError;
 use std::collections::HashSet;
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 将sqlExpr的value解析成Expr
     pub(crate) fn parse_value(
         &self,
         value: Value,
@@ -36,6 +38,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(lit(s)),
             Value::Null => Ok(Expr::Literal(ScalarValue::Null)),
             Value::Boolean(n) => Ok(lit(n)),
+            // value支持占位符类型
             Value::Placeholder(param) => {
                 Self::create_placeholder_expr(param, param_data_types)
             }
@@ -46,6 +49,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     /// Parse number in sql string, convert to Expr::Literal
+    /// 将数字解析成expr
     fn parse_sql_number(&self, n: &str) -> Result<Expr> {
         if n.find('E').is_some() {
             // not implemented yet
@@ -91,12 +95,15 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     /// Create a placeholder expression
     /// This is the same as Postgres's prepare statement syntax in which a placeholder starts with `$` sign and then
     /// number 1, 2, ... etc. For example, `$1` is the first placeholder; $2 is the second one and so on.
+    /// 创建占位符表达式
     fn create_placeholder_expr(
         param: String,
         param_data_types: &[DataType],
     ) -> Result<Expr> {
         // Parse the placeholder as a number because it is the only support from sqlparser and postgres
+        // 忽略$符号
         let index = param[1..].parse::<usize>();
+        // 占位符参数不能为0
         let idx = match index {
             Ok(0) => {
                 return Err(DataFusionError::Plan(format!(
@@ -111,6 +118,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             }
         };
         // Check if the placeholder is in the parameter list
+        // 找到参数对应的数据类型
         let param_type = param_data_types.get(idx);
         // Data type of the parameter
         debug!(
@@ -124,6 +132,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         })
     }
 
+    // 将数组类型的值转换成expr
     pub(super) fn sql_array_literal(
         &self,
         elements: Vec<SQLExpr>,
@@ -138,6 +147,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 &mut PlannerContext::new(),
             )?;
             match value {
+                // 将每个值转换成常量
                 Expr::Literal(scalar) => {
                     values.push(scalar);
                 }
@@ -149,9 +159,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             }
         }
 
+        // 他们的类型应该是一致的
         let data_types: HashSet<DataType> =
             values.iter().map(|e| e.get_datatype()).collect();
 
+        // 代表是一个空列表
         if data_types.is_empty() {
             Ok(lit(ScalarValue::new_list(None, DataType::Utf8)))
         } else if data_types.len() > 1 {

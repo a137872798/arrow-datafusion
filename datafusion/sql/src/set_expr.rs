@@ -21,14 +21,19 @@ use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
 use sqlparser::ast::{SetExpr, SetOperator, SetQuantifier};
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 将expr转换成逻辑计划
     pub(super) fn set_expr_to_plan(
         &self,
         set_expr: SetExpr,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         match set_expr {
+            // 将select语句转换成 logicalPlan
             SetExpr::Select(s) => self.select_to_plan(*s, planner_context),
+            // values可以理解为结果集
             SetExpr::Values(v) => self.sql_values_to_plan(v, planner_context),
+            // TODO
             SetExpr::SetOperation {
                 op,
                 left,
@@ -63,6 +68,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     }
                 }
             }
+            // query相比select会更复杂(query内部包含select) 会多套一层limit/order by
             SetExpr::Query(q) => self.query_to_plan(*q, planner_context),
             _ => Err(DataFusionError::NotImplemented(format!(
                 "Query {set_expr} not implemented yet"

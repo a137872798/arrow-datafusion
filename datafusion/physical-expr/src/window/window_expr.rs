@@ -34,12 +34,14 @@ use std::sync::Arc;
 
 /// A window expression that:
 /// * knows its resulting field
+/// 窗口表达式
 pub trait WindowExpr: Send + Sync + Debug {
     /// Returns the window expression as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
     /// The field of the final result of this window function.
+    /// 窗口函数最后结果字段
     fn field(&self) -> Result<Field>;
 
     /// Human readable name such as `"MIN(c2)"` or `"RANK()"`. The default
@@ -51,10 +53,12 @@ pub trait WindowExpr: Send + Sync + Debug {
     /// Expressions that are passed to the WindowAccumulator.
     /// Functions which take a single input argument, such as `sum`, return a single [`datafusion_expr::expr::Expr`],
     /// others (e.g. `cov`) return many.
+    /// 传递给WindowAccumulator的表达式
     fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>>;
 
     /// Evaluate the window function arguments against the batch and return
     /// array ref, normally the resulting `Vec` is a single element one.
+    /// 表达式作用在数据集上 会产生参数
     fn evaluate_args(&self, batch: &RecordBatch) -> Result<Vec<ArrayRef>> {
         self.expressions()
             .iter()
@@ -63,7 +67,7 @@ pub trait WindowExpr: Send + Sync + Debug {
             .collect()
     }
 
-    /// Evaluate the window function values against the batch
+    /// Evaluate the window function values against the batch  经过窗口函数处理后产生结果
     fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef>;
 
     /// Evaluate the window function against the batch. This function facilitates
@@ -80,15 +84,19 @@ pub trait WindowExpr: Send + Sync + Debug {
     }
 
     /// Expressions that's from the window function's partition by clause, empty if absent
+    /// 通过一组表达式 产生的一组值会作为分区键
     fn partition_by(&self) -> &[Arc<dyn PhysicalExpr>];
 
     /// Expressions that's from the window function's order by clause, empty if absent
+    /// 获取排序键
     fn order_by(&self) -> &[PhysicalSortExpr];
 
     /// Get order by columns, empty if absent
+    /// 根据排序键 对结果集进行处理
     fn order_by_columns(&self, batch: &RecordBatch) -> Result<Vec<SortColumn>> {
         self.order_by()
             .iter()
+            // 因为每个e 只会从batch中抽取一列数据 所以这样写最终也就是将多个列数据进行合并
             .map(|e| e.evaluate_to_sort_column(batch))
             .collect::<Result<Vec<SortColumn>>>()
     }
@@ -101,11 +109,14 @@ pub trait WindowExpr: Send + Sync + Debug {
 
     /// Get values columns (argument of Window Function)
     /// and order by columns (columns of the ORDER BY expression) used in evaluators
+    /// 将表达式处理后的结果 和 排序结果返回
     fn get_values_orderbys(
         &self,
         record_batch: &RecordBatch,
     ) -> Result<(Vec<ArrayRef>, Vec<ArrayRef>)> {
+        // 数据经过一组表达式后 产生一组结果
         let values = self.evaluate_args(record_batch)?;
+        // 将数据集排序
         let order_by_columns = self.order_by_columns(record_batch)?;
         let order_bys: Vec<ArrayRef> =
             order_by_columns.iter().map(|s| s.values.clone()).collect();
@@ -116,18 +127,20 @@ pub trait WindowExpr: Send + Sync + Debug {
     fn get_window_frame(&self) -> &Arc<WindowFrame>;
 
     /// Return a flag indicating whether this [WindowExpr] can run with
-    /// bounded memory.
+    /// bounded memory.  判断该表达式能否在有限的内存上运行
     fn uses_bounded_memory(&self) -> bool;
 
-    /// Get the reverse expression of this [WindowExpr].
+    /// Get the reverse expression of this [WindowExpr].  获取反向的表达式
     fn get_reverse_expr(&self) -> Option<Arc<dyn WindowExpr>>;
 }
 
 /// Trait for different `AggregateWindowExpr`s (`PlainAggregateWindowExpr`, `SlidingAggregateWindowExpr`)
+/// 代表基于聚合表达式 实现窗口表达式
 pub trait AggregateWindowExpr: WindowExpr {
     /// Get the accumulator for the window expression. Note that distinct
     /// window expressions may return distinct accumulators; e.g. sliding
     /// (non-sliding) expressions will return sliding (normal) accumulators.
+    /// 获取聚合表达式对应的聚合器
     fn get_accumulator(&self) -> Result<Box<dyn Accumulator>>;
 
     /// Given current range and the last range, calculates the accumulator
@@ -141,13 +154,18 @@ pub trait AggregateWindowExpr: WindowExpr {
     ) -> Result<ScalarValue>;
 
     /// Evaluates the window function against the batch.
+    /// 使用窗口函数聚合数据 并返回结果
     fn aggregate_evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
+        // 获取累加器
         let mut accumulator = self.get_accumulator()?;
         let mut last_range = Range { start: 0, end: 0 };
+        // 抽取出排序选项
         let sort_options: Vec<SortOptions> =
             self.order_by().iter().map(|o| o.options).collect();
+        // 产生对应的上下文对象
         let mut window_frame_ctx =
             WindowFrameContext::new(self.get_window_frame().clone(), sort_options);
+
         self.get_result_column(
             &mut accumulator,
             batch,
@@ -162,15 +180,18 @@ pub trait AggregateWindowExpr: WindowExpr {
     /// state so that it can work incrementally over multiple chunks.
     fn aggregate_evaluate_stateful(
         &self,
-        partition_batches: &PartitionBatches,
-        window_agg_state: &mut PartitionWindowAggStates,
+        partition_batches: &PartitionBatches,    // 已经被分区后的数据
+        window_agg_state: &mut PartitionWindowAggStates,  // 之前的状态还是可知的情况  本次的聚合结果会作用在之前的状态上
     ) -> Result<()> {
         let field = self.field()?;
         let out_type = field.data_type();
         for (partition_row, partition_batch_state) in partition_batches.iter() {
+
+            // 该分区之前还没有状态
             if !window_agg_state.contains_key(partition_row) {
                 let accumulator = self.get_accumulator()?;
                 window_agg_state.insert(
+                    // 将相关信息包装成 WindowState
                     partition_row.clone(),
                     WindowState {
                         state: WindowAggState::new(out_type)?,
@@ -182,14 +203,19 @@ pub trait AggregateWindowExpr: WindowExpr {
                 window_agg_state.get_mut(partition_row).ok_or_else(|| {
                     DataFusionError::Execution("Cannot find state".to_string())
                 })?;
+
             let accumulator = match &mut window_state.window_fn {
                 WindowFn::Aggregate(accumulator) => accumulator,
+                // 因为该窗口函数是基于聚合函数实现的  所以不该存在另外的情况
                 _ => unreachable!(),
             };
+            // 这个是state对象  维护了一些相关信息
             let state = &mut window_state.state;
+            // 拿到该分区的数据
             let record_batch = &partition_batch_state.record_batch;
 
             // If there is no window state context, initialize it.
+            // 获取之前的context
             let window_frame_ctx = state.window_frame_ctx.get_or_insert_with(|| {
                 let sort_options: Vec<SortOptions> =
                     self.order_by().iter().map(|o| o.options).collect();
@@ -204,6 +230,8 @@ pub trait AggregateWindowExpr: WindowExpr {
                 state.last_calculated_index,
                 !partition_batch_state.is_end,
             )?;
+
+            // 处理完这批新数据后 更新状态
             state.update(&out_col, partition_batch_state)?;
         }
         Ok(())
@@ -211,27 +239,38 @@ pub trait AggregateWindowExpr: WindowExpr {
 
     /// Calculates the window expression result for the given record batch.
     /// Assumes that `record_batch` belongs to a single partition.
+    /// 使用窗口函数聚合数据后 返回结果列
     fn get_result_column(
         &self,
         accumulator: &mut Box<dyn Accumulator>,
         record_batch: &RecordBatch,
         last_range: &mut Range<usize>,
         window_frame_ctx: &mut WindowFrameContext,
-        mut idx: usize,
+        mut idx: usize,   // 行号
         not_end: bool,
     ) -> Result<ArrayRef> {
+        // values是内部表达式的处理结果  order_bys是对原数据集的排序结果
         let (values, order_bys) = self.get_values_orderbys(record_batch)?;
         // We iterate on each row to perform a running calculation.
+        // 参与聚合计算的数据行数应该是一样的
         let length = values[0].len();
+
+        // 每个值对应一个聚合结果
         let mut row_wise_results: Vec<ScalarValue> = vec![];
+
+        // 从上次处理的行号开始 继续直到处理完所有数据
         while idx < length {
             // Start search from the last_range. This squeezes searched range.
+            // 用极其复杂的算法 得到了一个范围   内部还分为3种类型...
             let cur_range =
                 window_frame_ctx.calculate_range(&order_bys, last_range, length, idx)?;
             // Exit if the range extends all the way:
+            // TODO 目前还没有看到 not_end为true的情况
             if cur_range.end == length && not_end {
                 break;
             }
+
+            // 基于上次range 和本次range 产生结果
             let value = self.get_aggregate_result_inside_range(
                 last_range,
                 &cur_range,
@@ -243,6 +282,8 @@ pub trait AggregateWindowExpr: WindowExpr {
             row_wise_results.push(value);
             idx += 1;
         }
+
+        // 代表本次没有产生结果数据
         if row_wise_results.is_empty() {
             let field = self.field()?;
             let out_type = field.data_type();
@@ -268,6 +309,7 @@ pub fn reverse_order_bys(order_bys: &[PhysicalSortExpr]) -> Vec<PhysicalSortExpr
 
 #[derive(Debug)]
 pub enum WindowFn {
+    // 使用内置函数/聚合函数加工window内的数据
     Builtin(Box<dyn PartitionEvaluator>),
     Aggregate(Box<dyn Accumulator>),
 }
@@ -329,23 +371,27 @@ pub enum BuiltinWindowState {
 
 #[derive(Debug)]
 pub struct WindowAggState {
-    /// The range that we calculate the window function
+    /// The range that we calculate the window function  表示在该范围内的窗口数据都计算完了
     pub window_frame_range: Range<usize>,
     pub window_frame_ctx: Option<WindowFrameContext>,
     /// The index of the last row that its result is calculated inside the partition record batch buffer.
+    /// 累计处理了多少行记录
     pub last_calculated_index: usize,
     /// The offset of the deleted row number
     pub offset_pruned_rows: usize,
     /// Stores the results calculated by window frame
+    /// 输出结果
     pub out_col: ArrayRef,
-    /// Keeps track of how many rows should be generated to be in sync with input record_batch.
+    /// Keeps track of how many rows should be generated to be in sync with input record_batch.  剩下多少行还未处理
     // (For each row in the input record batch we need to generate a window result).
     pub n_row_result_missing: usize,
-    /// flag indicating whether we have received all data for this partition
+    /// flag indicating whether we have received all data for this partition  是否处理完所有数据了
     pub is_end: bool,
 }
 
 impl WindowAggState {
+
+    // 将相关属性 减少n_prune
     pub fn prune_state(&mut self, n_prune: usize) {
         self.window_frame_range = Range {
             start: self.window_frame_range.start - n_prune,
@@ -379,12 +425,15 @@ impl WindowAggState {
 }
 
 impl WindowAggState {
+
+    // 更新状态
     pub fn update(
         &mut self,
         out_col: &ArrayRef,
         partition_batch_state: &PartitionBatchState,
     ) -> Result<()> {
         self.last_calculated_index += out_col.len();
+        // 所有输出结果合并
         self.out_col = concat(&[&self.out_col, &out_col])?;
         self.n_row_result_missing =
             partition_batch_state.record_batch.num_rows() - self.last_calculated_index;
@@ -394,9 +443,10 @@ impl WindowAggState {
 }
 
 /// State for each unique partition determined according to PARTITION BY column(s)
+/// 每个窗口的状态
 #[derive(Debug)]
 pub struct PartitionBatchState {
-    /// The record_batch belonging to current partition
+    /// The record_batch belonging to current partition    该窗口积累的数据
     pub record_batch: RecordBatch,
     /// Flag indicating whether we have received all data for this partition
     pub is_end: bool,
@@ -416,6 +466,8 @@ pub struct WindowState {
 pub type PartitionWindowAggStates = IndexMap<PartitionKey, WindowState>;
 
 /// The IndexMap (i.e. an ordered HashMap) where record batches are separated for each partition.
+/// PartitionKey对应窗口的分区键  (分区键可以是多个值)
+/// PartitionBatchState对应窗口状态
 pub type PartitionBatches = IndexMap<PartitionKey, PartitionBatchState>;
 
 impl WindowAggState {

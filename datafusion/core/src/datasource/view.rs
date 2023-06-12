@@ -33,8 +33,9 @@ use crate::datasource::{TableProvider, TableType};
 use crate::execution::context::SessionState;
 
 /// An implementation of `TableProvider` that uses another logical plan.
+/// 视图表
 pub struct ViewTable {
-    /// LogicalPlan of the view
+    /// LogicalPlan of the view   应该是每次都执行该plan 得到视图
     logical_plan: LogicalPlan,
     /// File fields + partition columns
     table_schema: SchemaRef,
@@ -45,9 +46,10 @@ pub struct ViewTable {
 impl ViewTable {
     /// Create new view that is executed at query runtime.
     /// Takes a `LogicalPlan` and an optional create statement as input.
+    /// 创建一个视图表
     pub fn try_new(
-        logical_plan: LogicalPlan,
-        definition: Option<String>,
+        logical_plan: LogicalPlan,  // 基于该计划查询的结果
+        definition: Option<String>,  // 视图的定义语句
     ) -> Result<Self> {
         let table_schema = logical_plan.schema().as_ref().to_owned().into();
 
@@ -112,9 +114,11 @@ impl TableProvider for ViewTable {
             // avoiding adding a redundant projection (e.g. SELECT * FROM view)
             let current_projection =
                 (0..self.logical_plan.schema().fields().len()).collect::<Vec<usize>>();
+            // 使用原plan
             if projection == &current_projection {
                 self.logical_plan().clone()
             } else {
+                // 将必备的每个列组合在一起
                 let fields: Vec<Expr> = projection
                     .iter()
                     .map(|i| {
@@ -123,6 +127,7 @@ impl TableProvider for ViewTable {
                         )
                     })
                     .collect();
+                // 构建只包含这几个col的plan
                 LogicalPlanBuilder::from(self.logical_plan.clone())
                     .project(fields)?
                     .build()?
@@ -133,14 +138,17 @@ impl TableProvider for ViewTable {
         let mut plan = LogicalPlanBuilder::from(plan);
         let filter = filters.iter().cloned().reduce(|acc, new| acc.and(new));
 
+        // 通过过滤器处理结果集
         if let Some(filter) = filter {
             plan = plan.filter(filter)?;
         }
 
+        // 限制条数
         if let Some(limit) = limit {
             plan = plan.limit(0, Some(limit))?;
         }
 
+        // 产生物理计划  执行物理计划就可以得到结果
         state.create_physical_plan(&plan.build()?).await
     }
 }

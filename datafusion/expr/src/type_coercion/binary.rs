@@ -30,6 +30,7 @@ use datafusion_common::Result;
 /// perform the computation between the argument's types, even after type coercion.
 ///
 /// This function makes some assumptions about the underlying available computations.
+/// 返回二元计算的结果类型
 pub fn binary_operator_data_type(
     lhs_type: &DataType,
     op: &Operator,

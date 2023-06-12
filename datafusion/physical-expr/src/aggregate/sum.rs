@@ -44,11 +44,11 @@ use arrow::array::Decimal128Array;
 use arrow::compute::cast;
 use datafusion_row::accessor::RowAccessor;
 
-/// SUM aggregate expression
+/// SUM aggregate expression  sum代表求总值 是一个聚合表达式
 #[derive(Debug, Clone)]
 pub struct Sum {
-    name: String,
-    pub data_type: DataType,
+    name: String,    // 聚合后的字段名
+    pub data_type: DataType,  // 聚合后的数据类型
     expr: Arc<dyn PhysicalExpr>,
     nullable: bool,
     pub pre_cast_to_sum_type: bool,
@@ -100,10 +100,12 @@ impl AggregateExpr for Sum {
         ))
     }
 
+    // 生成一个累加器  数据集通过累加器后 会产生sum
     fn create_accumulator(&self) -> Result<Box<dyn Accumulator>> {
         Ok(Box::new(SumAccumulator::try_new(&self.data_type)?))
     }
 
+    // 返回一些描述状态的字段
     fn state_fields(&self) -> Result<Vec<Field>> {
         Ok(vec![
             Field::new(
@@ -171,7 +173,7 @@ impl PartialEq<dyn Any> for Sum {
 #[derive(Debug)]
 struct SumAccumulator {
     sum: ScalarValue,
-    count: u64,
+    count: u64,  // 记录累加了多少个值
 }
 
 impl SumAccumulator {
@@ -199,7 +201,7 @@ fn sum_decimal_batch(values: &ArrayRef, precision: u8, scale: i8) -> Result<Scal
     Ok(ScalarValue::Decimal128(result, precision, scale))
 }
 
-// sums the array and returns a ScalarValue of its corresponding type.
+// sums the array and returns a ScalarValue of its corresponding type. 将这批数据累加
 pub(crate) fn sum_batch(values: &ArrayRef, sum_type: &DataType) -> Result<ScalarValue> {
     // TODO refine the cast kernel in arrow-rs
     let cast_values = if values.data_type() != sum_type {

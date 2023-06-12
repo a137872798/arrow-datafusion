@@ -73,6 +73,7 @@ impl fmt::Display for AggregateFunction {
     }
 }
 
+// 可以通过名字找到一个聚合函数
 impl FromStr for AggregateFunction {
     type Err = DataFusionError;
     fn from_str(name: &str) -> Result<AggregateFunction> {
@@ -117,6 +118,7 @@ impl FromStr for AggregateFunction {
 
 /// Returns the datatype of the aggregate function.
 /// This is used to get the returned data type for aggregate expr.
+/// 根据输入的类型以及聚合函数类型 判断输出类型
 pub fn return_type(
     fun: &AggregateFunction,
     input_expr_types: &[DataType],
@@ -124,6 +126,7 @@ pub fn return_type(
     // Note that this function *must* return the same type that the respective physical expression returns
     // or the execution panics.
 
+    // 根据聚合函数类型 判断入参合法性
     let coerced_data_types = crate::type_coercion::aggregates::coerce_types(
         fun,
         input_expr_types,
@@ -139,6 +142,7 @@ pub fn return_type(
             // The coerced_data_types is same with input_types.
             Ok(coerced_data_types[0].clone())
         }
+        // 对参数结果类型做统一化处理
         AggregateFunction::Sum => sum_return_type(&coerced_data_types[0]),
         AggregateFunction::Variance => variance_return_type(&coerced_data_types[0]),
         AggregateFunction::VariancePop => variance_return_type(&coerced_data_types[0]),
@@ -171,6 +175,7 @@ pub fn sum_type_of_avg(input_expr_types: &[DataType]) -> Result<DataType> {
     // Note that this function *must* return the same type that the respective physical expression returns
     // or the execution panics.
     let fun = AggregateFunction::Avg;
+    // 通过平均数函数修正参数类型 然后推算sum的类型
     let coerced_data_types = crate::type_coercion::aggregates::coerce_types(
         &fun,
         input_expr_types,
@@ -180,13 +185,17 @@ pub fn sum_type_of_avg(input_expr_types: &[DataType]) -> Result<DataType> {
 }
 
 /// the signatures supported by the function `fun`.
+/// 根据聚合函数  返回参数签名
 pub fn signature(fun: &AggregateFunction) -> Signature {
     // note: the physical expression must accept the type returned by this function or the execution panics.
     match fun {
+        // 无论传入什么样的数据集 count的值不会收到影响
         AggregateFunction::Count => Signature::variadic_any(Volatility::Immutable),
+        // 代表仅针对一个参数
         AggregateFunction::ApproxDistinct
         | AggregateFunction::Grouping
         | AggregateFunction::ArrayAgg => Signature::any(1, Volatility::Immutable),
+        // 传入支持的参数类型  和数量
         AggregateFunction::Min | AggregateFunction::Max => {
             let valid = STRINGS
                 .iter()
@@ -198,6 +207,8 @@ pub fn signature(fun: &AggregateFunction) -> Signature {
                 .collect::<Vec<_>>();
             Signature::uniform(1, valid, Volatility::Immutable)
         }
+
+        // 只支持数字类型 一个参数
         AggregateFunction::Avg
         | AggregateFunction::Sum
         | AggregateFunction::Variance

@@ -55,6 +55,7 @@ fn ident_to_string(ident: &Ident) -> String {
     normalize_ident(ident.to_owned())
 }
 
+// 将objectName的各个部分拼接起来
 fn object_name_to_string(object_name: &ObjectName) -> String {
     object_name
         .0
@@ -64,6 +65,7 @@ fn object_name_to_string(object_name: &ObjectName) -> String {
         .join(".")
 }
 
+// 适配sql-parser 将名字解析出来
 fn get_schema_name(schema_name: &SchemaName) -> String {
     match schema_name {
         SchemaName::Simple(schema_name) => object_name_to_string(schema_name),
@@ -76,17 +78,21 @@ fn get_schema_name(schema_name: &SchemaName) -> String {
     }
 }
 
+// 该对象用于statement与logicalPlan之间的转换
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     /// Generate a logical plan from an DataFusion SQL statement
     pub fn statement_to_plan(&self, statement: DFStatement) -> Result<LogicalPlan> {
         match statement {
+            // 创建外部表 好像是将表落盘
             DFStatement::CreateExternalTable(s) => self.external_table_to_plan(s),
             DFStatement::Statement(s) => self.sql_statement_to_plan(*s),
+            // TODO
             DFStatement::DescribeTableStmt(s) => self.describe_table_to_plan(s),
         }
     }
 
     /// Generate a logical plan from an SQL statement
+    /// 适配sql-parser
     pub fn sql_statement_to_plan(&self, statement: Statement) -> Result<LogicalPlan> {
         self.sql_statement_to_plan_with_context(statement, &mut PlannerContext::new())
     }
@@ -97,18 +103,22 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         statement: Statement,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+        // 取出sql
         let sql = Some(statement.to_string());
         match statement {
             Statement::Explain {
                 verbose,
                 statement,
-                analyze,
+                analyze,   // 决定最终产生的是analyse还是explain
                 format: _,
                 describe_alias: _,
                 ..
             } => self.explain_statement_to_plan(verbose, analyze, *statement),
+            // 将查询类型转换成plan
             Statement::Query(query) => self.query_to_plan(*query, planner_context),
+            // pgsql专门的plan
             Statement::ShowVariable { variable } => self.show_variable_to_plan(&variable),
+            // TODO
             Statement::SetVariable {
                 local,
                 hivevar,
@@ -116,6 +126,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 value,
             } => self.set_variable_to_plan(local, hivevar, &variable, value),
 
+            // 创建新表
             Statement::CreateTable {
                 query,
                 name,
@@ -126,15 +137,21 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 if_not_exists,
                 or_replace,
                 ..
+                // 应该是不支持table_properties/with_options吧
             } if table_properties.is_empty() && with_options.is_empty() => match query {
                 Some(query) => {
+                    // constraints包含表的约束性信息  比如主键/唯一键
                     let primary_key = Self::primary_key_from_constraints(&constraints)?;
 
+                    // 将一个查询语句转换成plan  应该是create...select 语法
                     let plan = self.query_to_plan(*query, planner_context)?;
                     let input_schema = plan.schema();
 
+                    // 新表的所有列
                     let plan = if !columns.is_empty() {
+
                         let schema = self.build_schema(columns)?.to_dfschema_ref()?;
+                        // 如果是基于另一个sql的查询结果  字段数量必须一致
                         if schema.fields().len() != input_schema.fields().len() {
                             return Err(DataFusionError::Plan(format!(
                             "Mismatch: {} columns specified, but result has {} columns",
@@ -148,10 +165,13 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                             .iter()
                             .zip(input_fields)
                             .map(|(field, input_field)| {
+                                // 对结果进行转型 + 别名
                                 cast(col(input_field.name()), field.data_type().clone())
                                     .alias(field.name())
                             })
                             .collect::<Vec<_>>();
+
+                        // 将查询结果经过转型和别名处理
                         LogicalPlanBuilder::from(plan.clone())
                             .project(project_exprs)?
                             .build()?
@@ -169,8 +189,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 }
 
                 None => {
+                    // 创建空表  先从约束中找到主键
                     let primary_key = Self::primary_key_from_constraints(&constraints)?;
 
+                    // 根据列信息生成schema
                     let schema = self.build_schema(columns)?.to_dfschema_ref()?;
                     let plan = EmptyRelation {
                         produce_one_row: false,
@@ -178,6 +200,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     };
                     let plan = LogicalPlan::EmptyRelation(plan);
 
+                    // 生成一个创建表的计划   里面不需要数据 但是需要schema
                     Ok(LogicalPlan::CreateMemoryTable(CreateMemoryTable {
                         name: self.object_name_to_table_reference(name)?,
                         primary_key,
@@ -188,6 +211,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 }
             },
 
+            // 创建一个视图 视图就是将某个查询结果作为一个临时表
             Statement::CreateView {
                 or_replace,
                 name,
@@ -195,8 +219,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 query,
                 with_options,
                 ..
+                // 目前还不支持with_options
             } if with_options.is_empty() => {
                 let mut plan = self.query_to_plan(*query, &mut PlannerContext::new())?;
+                // 将别名覆盖到每个结果列上
                 plan = self.apply_expr_alias(plan, columns)?;
 
                 Ok(LogicalPlan::CreateView(CreateView {
@@ -206,12 +232,15 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     definition: sql,
                 }))
             }
+            // 查看DDL语句
             Statement::ShowCreate { obj_type, obj_name } => match obj_type {
                 ShowCreateObject::Table => self.show_create_table_to_plan(obj_name),
                 _ => Err(DataFusionError::NotImplemented(
                     "Only `SHOW CREATE TABLE  ...` statement is supported".to_string(),
                 )),
             },
+
+            // 创建一个schema
             Statement::CreateSchema {
                 schema_name,
                 if_not_exists,
@@ -220,6 +249,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 if_not_exists,
                 schema: Arc::new(DFSchema::empty()),
             })),
+
+            // 创建catalog
             Statement::CreateDatabase {
                 db_name,
                 if_not_exists,
@@ -229,6 +260,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 if_not_exists,
                 schema: Arc::new(DFSchema::empty()),
             })),
+
+            // 删除表
             Statement::Drop {
                 object_type,
                 if_exists,
@@ -242,6 +275,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 let name = match names.len() {
                     0 => Err(ParserError("Missing table name.".to_string()).into()),
                     1 => self.object_name_to_table_reference(names.pop().unwrap()),
+                    // drop不支持同时删除多张表
                     _ => {
                         Err(ParserError("Multiple objects not supported".to_string())
                             .into())
@@ -249,6 +283,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 }?;
 
                 match object_type {
+                    // 根据不同类型生成不同对象   总言之就是简单的赋值操作
                     ObjectType::Table => Ok(LogicalPlan::DropTable(DropTable {
                         name,
                         if_exists,
@@ -265,6 +300,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     )),
                 }
             }
+
+            // 可以提前编译一组准备好的sql  这样之后需要更改参数即可  (每次都重新解析sql还会涉及到每次优化的开销)
             Statement::Prepare {
                 name,
                 data_types,
@@ -278,6 +315,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
                 // Create planner context with parameters
                 let mut planner_context = PlannerContext::new()
+                    // 设置参数的类型
                     .with_prepare_param_data_types(data_types.clone());
 
                 // Build logical plan for inner statement of the prepare statement
@@ -285,6 +323,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     *statement,
                     &mut planner_context,
                 )?;
+                // 就是包装了一下
                 Ok(LogicalPlan::Prepare(Prepare {
                     name: ident_to_string(&name),
                     data_types,
@@ -292,6 +331,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 }))
             }
 
+            // 查看schema下所有表
             Statement::ShowTables {
                 extended,
                 full,
@@ -299,6 +339,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 filter,
             } => self.show_tables_to_plan(extended, full, db_name, filter),
 
+            // 查看某个表的所有列  也是借助元数据表
             Statement::ShowColumns {
                 extended,
                 full,
@@ -306,6 +347,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 filter,
             } => self.show_columns_to_plan(extended, full, table_name, filter),
 
+            // 插入会话
             Statement::Insert {
                 or,
                 into,
@@ -355,9 +397,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     ))?;
                 }
                 let _ = into; // optional keyword doesn't change behavior
+
+                // 排开不支持的参数后  直接调用该方法
                 self.insert_to_plan(table_name, columns, source)
             }
 
+            // 更新操作
             Statement::Update {
                 table,
                 assignments,
@@ -373,6 +418,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 self.update_to_plan(table, assignments, from, selection)
             }
 
+            // 删除操作
             Statement::Delete {
                 table_name,
                 using,
@@ -392,7 +438,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 self.delete_to_plan(table_name, selection)
             }
 
+            // 开启一个新事务
             Statement::StartTransaction { modes } => {
+                // 取出隔离级别和访问模式
                 let isolation_level: ast::TransactionIsolationLevel = modes
                     .iter()
                     .filter_map(|m: &ast::TransactionMode| match m {
@@ -433,6 +481,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                         TransactionAccessMode::ReadWrite
                     }
                 };
+                // 将相关参数变成 TransactionStart
                 let statement = PlanStatement::TransactionStart(TransactionStart {
                     access_mode,
                     isolation_level,
@@ -464,6 +513,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     /// Generate a logical plan from a "SHOW TABLES" query
+    /// 查看所有表
     fn show_tables_to_plan(
         &self,
         extended: bool,
@@ -471,9 +521,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         db_name: Option<Ident>,
         filter: Option<ShowStatementFilter>,
     ) -> Result<LogicalPlan> {
+        // 必须要有元数据表的支持
         if self.has_table("information_schema", "tables") {
             // we only support the basic "SHOW TABLES"
             // https://github.com/apache/arrow-datafusion/issues/3188
+            // 还不支持其他参数
             if db_name.is_some() || filter.is_some() || full || extended {
                 Err(DataFusionError::Plan(
                     "Unsupported parameters to SHOW TABLES".to_string(),
@@ -544,6 +596,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     /// Generate a logical plan from a CREATE EXTERNAL TABLE statement
+    /// 代表会将表数据导出到外部
     fn external_table_to_plan(
         &self,
         statement: CreateExternalTable,
@@ -579,9 +632,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             ))?;
         }
 
+        // 根据列信息创建schema
         let schema = self.build_schema(columns)?;
         let df_schema = schema.to_dfschema_ref()?;
 
+        // 生成排序信息
         let ordered_exprs =
             self.build_order_by(order_exprs, &df_schema, &mut PlannerContext::new())?;
 
@@ -605,25 +660,29 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     }
 
     /// Generate a plan for EXPLAIN ... that will print out a plan
-    ///
+    /// 从sql中解析出一个EXPLAIN类型的会话 转换成plan
     fn explain_statement_to_plan(
         &self,
         verbose: bool,
         analyze: bool,
         statement: Statement,
     ) -> Result<LogicalPlan> {
+        // EXPLAIN 内部嵌套了另一个statement 将内部的转化成plan
         let plan = self.sql_statement_to_plan(statement)?;
         let plan = Arc::new(plan);
+        // explain类型使用的schema是固定的
         let schema = LogicalPlan::explain_schema();
         let schema = schema.to_dfschema_ref()?;
 
         if analyze {
+            // 这个plan会运行内部的计划 并打印一些统计信息
             Ok(LogicalPlan::Analyze(Analyze {
                 verbose,
                 input: plan,
                 schema,
             }))
         } else {
+            // 将plan以string形式输出
             let stringified_plans =
                 vec![plan.to_stringified(PlanType::InitialLogicalPlan)];
             Ok(LogicalPlan::Explain(Explain {
@@ -746,6 +805,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         Ok(LogicalPlan::Statement(statement))
     }
 
+    // 删除表中的记录
     fn delete_to_plan(
         &self,
         table_factor: TableFactor,
@@ -763,11 +823,13 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         let provider = self.schema_provider.get_table_provider(table_ref.clone())?;
         let schema = (*provider.schema()).clone();
         let schema = DFSchema::try_from(schema)?;
+        // 产生一个查询的plan
         let scan =
             LogicalPlanBuilder::scan(object_name_to_string(&table_name), provider, None)?
                 .build()?;
         let mut planner_context = PlannerContext::new();
 
+        // 对应 delete where
         let source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
@@ -775,6 +837,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     self.sql_to_expr(predicate_expr, &schema, &mut planner_context)?;
                 let schema = Arc::new(schema.clone());
                 let mut using_columns = HashSet::new();
+                // 确保用到的列都在schema中
                 expr_to_columns(&filter_expr, &mut using_columns)?;
                 let filter_expr = normalize_col_with_schemas_and_ambiguity_check(
                     filter_expr,
@@ -785,6 +848,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             }
         };
 
+        // 这样的逻辑计划要怎么变成物理计划呢
         let plan = LogicalPlan::Dml(DmlStatement {
             table_name: table_ref,
             table_schema: schema.into(),
@@ -794,6 +858,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         Ok(plan)
     }
 
+    // 执行更新操作
     fn update_to_plan(
         &self,
         table: TableWithJoins,
@@ -801,6 +866,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         from: Option<TableWithJoins>,
         predicate_expr: Option<Expr>,
     ) -> Result<LogicalPlan> {
+        // 代表本次被更新的表
         let table_name = match &table.relation {
             TableFactor::Table { name, .. } => name.clone(),
             _ => Err(DataFusionError::Plan(
@@ -813,8 +879,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         let provider = self
             .schema_provider
             .get_table_provider(table_name.clone())?;
+        // 借助provider 将表名换成schema
         let arrow_schema = (*provider.schema()).clone();
         let table_schema = Arc::new(DFSchema::try_from(arrow_schema)?);
+        // 将field name和identifier包装在一起
         let values = table_schema.fields().iter().map(|f| {
             (
                 f.name().clone(),
@@ -824,6 +892,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
         // Overwrite with assignment expressions
         let mut planner_context = PlannerContext::new();
+
+        // 代表赋值信息   将赋值的列名与赋予的列值关联起来
         let mut assign_map = assignments
             .iter()
             .map(|assign| {
@@ -845,10 +915,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             .collect::<Vec<_>>();
 
         // Build scan
+        // update from语法
         let from = from.unwrap_or(table);
         let scan = self.plan_from_tables(vec![from], &mut planner_context)?;
 
-        // Filter
+        // Filter   谓语是作用在from结果上的
         let source = match predicate_expr {
             None => scan,
             Some(predicate_expr) => {
@@ -864,15 +935,19 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     &[&[&table_schema]],
                     &[using_columns],
                 )?;
+                // 将filter作用在scan上
                 LogicalPlan::Filter(Filter::try_new(filter_expr, Arc::new(scan))?)
             }
         };
 
         // Projection
         let mut exprs = vec![];
+
+        // 更新涉及到的所有字段
         for (col_name, expr) in values.into_iter() {
             let expr = self.sql_to_expr(expr, &table_schema, &mut planner_context)?;
             let expr = match expr {
+                // 补充data_type
                 datafusion_expr::Expr::Placeholder {
                     ref id,
                     ref data_type,
@@ -888,9 +963,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 },
                 _ => expr,
             };
+            // 设置别名
             let expr = expr.alias(col_name);
             exprs.push(expr);
         }
+
+        // 对返回结果加一层投影
         let source = project(source, exprs)?;
 
         let plan = LogicalPlan::Dml(DmlStatement {
@@ -902,6 +980,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         Ok(plan)
     }
 
+    // 将insert转换成plan
     fn insert_to_plan(
         &self,
         table_name: ObjectName,
@@ -913,9 +992,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         let provider = self
             .schema_provider
             .get_table_provider(table_name.clone())?;
+
+        // 找到表结构
         let arrow_schema = (*provider.schema()).clone();
         let table_schema = DFSchema::try_from(arrow_schema)?;
 
+        // 没有指定插入列的情况  默认针对所有列
         let fields = if columns.is_empty() {
             // Empty means we're inserting into all columns of the table
             table_schema.fields().clone()
@@ -938,9 +1020,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
         // infer types for Values clause... other types should be resolvable the regular way
         let mut prepare_param_data_types = BTreeMap::new();
+
+        // 当insert语句时  query直接对应一组values就可以了
         if let SetExpr::Values(ast::Values { rows, .. }) = (*source.body).clone() {
             for row in rows.iter() {
                 for (idx, val) in row.iter().enumerate() {
+                    // 如果列值是一个占位符
                     if let ast::Expr::Value(Value::Placeholder(name)) = val {
                         let name =
                             name.replace('$', "").parse::<usize>().map_err(|_| {
@@ -954,17 +1039,23 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                                 idx + 1
                             ))
                         })?;
+
+                        // 将列名和列的类型存入map
                         let dt = field.field().data_type().clone();
                         let _ = prepare_param_data_types.insert(name, dt);
                     }
                 }
             }
         }
+
+
         let prepare_param_data_types = prepare_param_data_types.into_values().collect();
 
         // Projection
         let mut planner_context =
             PlannerContext::new().with_prepare_param_data_types(prepare_param_data_types);
+
+        // source本身就是一组值
         let source = self.query_to_plan(*source, &mut planner_context)?;
         if fields.len() != source.schema().fields().len() {
             Err(DataFusionError::Plan(
@@ -975,6 +1066,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             .iter()
             .zip(source.schema().fields().iter())
             .map(|(target_field, source_field)| {
+                // 字段转型 + 设置别名
                 let expr =
                     datafusion_expr::Expr::Column(source_field.unqualified_column())
                         .cast_to(target_field.data_type(), source.schema())?
@@ -982,6 +1074,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 Ok(expr)
             })
             .collect::<Result<Vec<datafusion_expr::Expr>>>()?;
+
+        // 将结果转换成与target匹配的值
         let source = project(source, exprs)?;
 
         let plan = LogicalPlan::Dml(DmlStatement {
@@ -993,6 +1087,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         Ok(plan)
     }
 
+    // 返回某个表的所有列
     fn show_columns_to_plan(
         &self,
         extended: bool,
@@ -1038,17 +1133,19 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         self.statement_to_plan(rewrite.pop_front().unwrap()) // length of rewrite is 1
     }
 
+    // 查看某个表的创建语句
     fn show_create_table_to_plan(
         &self,
         sql_table_name: ObjectName,
     ) -> Result<LogicalPlan> {
+        // 必须要元数据表的支持 才能查看ddl语句
         if !self.has_table("information_schema", "tables") {
             return Err(DataFusionError::Plan(
                 "SHOW CREATE TABLE is not supported unless information_schema is enabled"
                     .to_string(),
             ));
         }
-        // Figure out the where clause
+        // Figure out the where clause 设置查询条件需要匹配catalog/schema/table
         let where_clause = object_name_to_qualifier(
             &sql_table_name,
             self.options.enable_ident_normalization,
@@ -1056,14 +1153,17 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
         // Do a table lookup to verify the table exists
         let table_ref = self.object_name_to_table_reference(sql_table_name)?;
+        // 确保schema下有该table
         let _ = self.schema_provider.get_table_provider(table_ref)?;
 
         let query = format!(
             "SELECT table_catalog, table_schema, table_name, definition FROM information_schema.views WHERE {where_clause}"
         );
 
+        // 解析sql生成会话对象
         let mut rewrite = DFParser::parse_sql(&query)?;
         assert_eq!(rewrite.len(), 1);
+        // 将语句转换成逻辑计划
         self.statement_to_plan(rewrite.pop_front().unwrap()) // length of rewrite is 1
     }
 
@@ -1078,14 +1178,16 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             .is_ok()
     }
 
+    // 从约束性信息中找到主键
     fn primary_key_from_constraints(
         constraints: &[TableConstraint],
     ) -> Result<Vec<Column>> {
         let pk: Result<Vec<&Vec<Ident>>> = constraints
             .iter()
             .map(|c: &TableConstraint| match c {
+                // 目前仅支持唯一键
                 TableConstraint::Unique {
-                    columns,
+                    columns,  // 可以是多个列组合的结果
                     is_primary,
                     ..
                 } => match is_primary {

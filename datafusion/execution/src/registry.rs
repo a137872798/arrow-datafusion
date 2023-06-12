@@ -22,13 +22,14 @@ use datafusion_expr::{AggregateUDF, ScalarUDF};
 use std::{collections::HashSet, sync::Arc};
 
 /// A registry knows how to build logical expressions out of user-defined function' names
+/// 用于注册用户定义函数
 pub trait FunctionRegistry {
-    /// Set of all available udfs.
+    /// Set of all available udfs.   返回所有用户定义函数名称
     fn udfs(&self) -> HashSet<String>;
 
-    /// Returns a reference to the udf named `name`.
+    /// Returns a reference to the udf named `name`.   根据名字检索某个用户定义函数
     fn udf(&self, name: &str) -> Result<Arc<ScalarUDF>>;
 
-    /// Returns a reference to the udaf named `name`.
+    /// Returns a reference to the udaf named `name`.     检索用户定义聚合函数
     fn udaf(&self, name: &str) -> Result<Arc<AggregateUDF>>;
 }

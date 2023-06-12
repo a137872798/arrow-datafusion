@@ -38,7 +38,9 @@ use crate::physical_plan::filter::batch_filter;
 use futures::stream::{Stream, StreamExt};
 
 /// stream struct for aggregation without grouping columns
+/// 只有聚合表达式 和过滤器   没有分组参数的数据流
 pub(crate) struct AggregateStream {
+    // 通过流可以拿到数据集
     stream: BoxStream<'static, Result<RecordBatch>>,
     schema: SchemaRef,
 }
@@ -51,51 +53,62 @@ pub(crate) struct AggregateStream {
 struct AggregateStreamInner {
     schema: SchemaRef,
     mode: AggregateMode,
-    input: SendableRecordBatchStream,
+    input: SendableRecordBatchStream,   // 待处理的数据集
     baseline_metrics: BaselineMetrics,
-    aggregate_expressions: Vec<Vec<Arc<dyn PhysicalExpr>>>,
-    filter_expressions: Vec<Option<Arc<dyn PhysicalExpr>>>,
-    accumulators: Vec<AccumulatorItem>,
+    aggregate_expressions: Vec<Vec<Arc<dyn PhysicalExpr>>>,   // 根据聚合模式加工过的表达式  最外层的vec中每个vec对应一个聚合函数
+    filter_expressions: Vec<Option<Arc<dyn PhysicalExpr>>>,   // 过滤数据集
+    accumulators: Vec<AccumulatorItem>,   // 每个聚合函数对应一个累加器
     reservation: MemoryReservation,
     finished: bool,
 }
 
 impl AggregateStream {
+
     #[allow(clippy::too_many_arguments)]
-    /// Create a new AggregateStream
+    /// Create a new AggregateStream   不分组场景下对数据聚合   基于一个普通的数据流初始化聚合数据流
     pub fn new(
-        mode: AggregateMode,
+        mode: AggregateMode,   // 聚合模式
         schema: SchemaRef,
-        aggr_expr: Vec<Arc<dyn AggregateExpr>>,
-        filter_expr: Vec<Option<Arc<dyn PhysicalExpr>>>,
-        input: SendableRecordBatchStream,
-        baseline_metrics: BaselineMetrics,
+        aggr_expr: Vec<Arc<dyn AggregateExpr>>,  // 聚合表达式  包含了聚合逻辑
+        filter_expr: Vec<Option<Arc<dyn PhysicalExpr>>>,   // 用于过滤数据集
+        input: SendableRecordBatchStream,   // 未被聚合的数据流
+        baseline_metrics: BaselineMetrics,  // 内部包含多个指标
         context: Arc<TaskContext>,
-        partition: usize,
+        partition: usize,   // 数据集对应的分区
     ) -> Result<Self> {
+        // 不同的聚合模式 使用聚合表达式的方式也不同
+        // Partial | Single 在使用前可能会先将数据转换成结果类型
+        // Final | FinalPartitioned 会将每个聚合表达式展开
         let aggregate_expressions = aggregate_expressions(&aggr_expr, &mode, 0)?;
+
         let filter_expressions = match mode {
             AggregateMode::Partial | AggregateMode::Single => filter_expr,
+            // final是第二阶段  实际上filter已经在第一阶段生效过了  所以不需要重复使用
             AggregateMode::Final | AggregateMode::FinalPartitioned => {
                 vec![None; aggr_expr.len()]
             }
         };
+
+        // 为每个表达式创建相关的累加器
         let accumulators = create_accumulators(&aggr_expr)?;
 
+        // 注册内存消耗对象   返回的对象会记录内存的消耗情况
         let reservation = MemoryConsumer::new(format!("AggregateStream[{partition}]"))
             .register(context.memory_pool());
 
         let inner = AggregateStreamInner {
             schema: Arc::clone(&schema),
             mode,
-            input,
-            baseline_metrics,
-            aggregate_expressions,
-            filter_expressions,
-            accumulators,
+            input,   // 待处理的数据集
+            baseline_metrics,  // 记录计算中的各种指标
+            aggregate_expressions,  // 传入加工过的聚合表达式
+            filter_expressions,  // 过滤数据集的表达式
+            accumulators,  // 各个聚合表达式对应的累加器
             reservation,
             finished: false,
         };
+
+        // 产生数据流
         let stream = futures::stream::unfold(inner, |mut this| async move {
             if this.finished {
                 return None;
@@ -104,9 +117,11 @@ impl AggregateStream {
             let elapsed_compute = this.baseline_metrics.elapsed_compute();
 
             loop {
+                // 每次读取一组数据
                 let result = match this.input.next().await {
                     Some(Ok(batch)) => {
                         let timer = elapsed_compute.timer();
+                        // 这组数据将会作用在各个累加器上
                         let result = aggregate_batch(
                             &this.mode,
                             batch,
@@ -115,6 +130,7 @@ impl AggregateStream {
                             &this.filter_expressions,
                         );
 
+                        // 此时数据已经累加到accumulator中了
                         timer.done();
 
                         // allocate memory
@@ -129,8 +145,12 @@ impl AggregateStream {
                     }
                     Some(Err(e)) => Err(e),
                     None => {
+                        // 此时已经拉取完所有数据了
                         this.finished = true;
                         let timer = this.baseline_metrics.elapsed_compute().timer();
+
+                        // 之前的数据已经经过累加器的处理了  现在就是要把数据导出来
+                        // 当agg mode 为Partial 时  返回累加器的状态字段   其余mode 返回累加结果
                         let result = finalize_aggregation(&this.accumulators, &this.mode)
                             .and_then(|columns| {
                                 RecordBatch::try_new(this.schema.clone(), columns)
@@ -145,6 +165,7 @@ impl AggregateStream {
                 };
 
                 this.finished = true;
+                // 返回聚合结果
                 return Some((result, this));
             }
         });
@@ -165,6 +186,7 @@ impl Stream for AggregateStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
+        // 代理到内部的流 拉取数据
         this.stream.poll_next_unpin(cx)
     }
 }
@@ -179,13 +201,13 @@ impl RecordBatchStream for AggregateStream {
 ///
 /// If successful, this returns the additional number of bytes that were allocated during this process.
 ///
-/// TODO: Make this a member function
+/// 每拉取到一组数据  会通过每个聚合表达式进行聚合
 fn aggregate_batch(
     mode: &AggregateMode,
-    batch: RecordBatch,
-    accumulators: &mut [AccumulatorItem],
-    expressions: &[Vec<Arc<dyn PhysicalExpr>>],
-    filters: &[Option<Arc<dyn PhysicalExpr>>],
+    batch: RecordBatch,  // 待聚合数据
+    accumulators: &mut [AccumulatorItem],  // 每个聚合表达式 对应一个累加器
+    expressions: &[Vec<Arc<dyn PhysicalExpr>>],  // 根据mode加工后的聚合表达式
+    filters: &[Option<Arc<dyn PhysicalExpr>>],  // 每个聚合表达式对应一个过滤器
 ) -> Result<usize> {
     let mut allocated = 0usize;
 
@@ -196,28 +218,30 @@ fn aggregate_batch(
 
     // 1.1
     accumulators
-        .iter_mut()
-        .zip(expressions)
-        .zip(filters)
+        .iter_mut()  // 遍历每个累加器
+        .zip(expressions)  // 将每个累加器关联的聚合函数的子表达式接上
+        .zip(filters)     // 再拼接上对应的过滤器
         .try_for_each(|((accum, expr), filter)| {
-            // 1.2
+            // 1.2 将过滤器作用在结果集上
             let batch = match filter {
                 Some(filter) => Cow::Owned(batch_filter(&batch, filter)?),
                 None => Cow::Borrowed(&batch),
             };
-            // 1.3
+            // 1.3 提取出聚合需要的相关列值
             let values = &expr
                 .iter()
-                .map(|e| e.evaluate(&batch))
+                .map(|e| e.evaluate(&batch))  // 相当于聚合函数从过滤后的结果集中提取关键列
                 .map(|r| r.map(|v| v.into_array(batch.num_rows())))
                 .collect::<Result<Vec<_>>>()?;
 
             // 1.4
-            let size_pre = accum.size();
+            let size_pre = accum.size();  // 此前累加器中已经累计的内存量
             let res = match mode {
+                // 采用不同聚合方式
                 AggregateMode::Partial | AggregateMode::Single => {
                     accum.update_batch(values)
                 }
+                // 这种聚合模式下  获取的是状态列 而不是数据列 每个累加器的状态不一样 但是都能够正确利用
                 AggregateMode::Final | AggregateMode::FinalPartitioned => {
                     accum.merge_batch(values)
                 }

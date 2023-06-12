@@ -31,10 +31,12 @@ pub use order_by::rewrite_sort_cols_by_aggs;
 
 /// Recursively call [`Column::normalize_with_schemas`] on all [`Column`] expressions
 /// in the `expr` expression tree.
+/// Transformed 代表一个转换结果  只有Expr::Column才能被处理
 pub fn normalize_col(expr: Expr, plan: &LogicalPlan) -> Result<Expr> {
     expr.transform(&|expr| {
         Ok({
             if let Expr::Column(c) = expr {
+                // 对列进行标准化处理  就是修改col为全限定名
                 let col = LogicalPlanBuilder::normalize(plan, c)?;
                 Transformed::Yes(Expr::Column(col))
             } else {
@@ -74,9 +76,11 @@ pub fn normalize_col_with_schemas_and_ambiguity_check(
     schemas: &[&[&DFSchema]],
     using_columns: &[HashSet<Column>],
 ) -> Result<Expr> {
+    // transform函数会作用到子节点
     expr.transform(&|expr| {
         Ok({
             if let Expr::Column(c) = expr {
+                // 检查并返回col
                 let col =
                     c.normalize_with_schemas_and_ambiguity_check(schemas, using_columns)?;
                 Transformed::Yes(Expr::Column(col))
@@ -167,12 +171,14 @@ pub fn coerce_plan_expr_for_schema(
     match plan {
         // special case Projection to avoid adding multiple projections
         LogicalPlan::Projection(Projection { expr, input, .. }) => {
+            // 考虑类型不匹配的情况 用Cast包装
             let new_exprs =
                 coerce_exprs_for_schema(expr.clone(), input.schema(), schema)?;
             let projection = Projection::try_new(new_exprs, input.clone())?;
             Ok(LogicalPlan::Projection(projection))
         }
         _ => {
+            // 将所有字段转换成col
             let exprs: Vec<Expr> = plan
                 .schema()
                 .fields()
@@ -180,6 +186,7 @@ pub fn coerce_plan_expr_for_schema(
                 .map(|field| Expr::Column(field.qualified_column()))
                 .collect();
 
+            // 为了匹配schema 可能会对expr做一层Cast包装
             let new_exprs = coerce_exprs_for_schema(exprs, plan.schema(), schema)?;
             let add_project = new_exprs.iter().any(|expr| expr.try_into_col().is_err());
             if add_project {
@@ -201,12 +208,16 @@ fn coerce_exprs_for_schema(
         .into_iter()
         .enumerate()
         .map(|(idx, expr)| {
+            // 获取schema中对应字段的数据类型
             let new_type = dst_schema.field(idx).data_type();
+            // 获取该表达式的类型 如果类型不匹配  需要用Cast进行包装
             if new_type != &expr.get_type(src_schema)? {
                 match expr {
                     Expr::Alias(e, alias) => {
+                        // 内部追加一层Cast
                         Ok(e.cast_to(new_type, src_schema)?.alias(alias))
                     }
+                    // 直接追加Cast
                     _ => expr.cast_to(new_type, src_schema),
                 }
             } else {

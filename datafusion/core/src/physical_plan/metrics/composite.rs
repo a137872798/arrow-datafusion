@@ -36,8 +36,8 @@ use std::time::Duration;
 /// Therefore, We need a separation of metrics for which are final metrics (for output_rows accumulation),
 /// and which are intermediate metrics that we only account for elapsed_compute time.
 pub struct CompositeMetricsSet {
-    mid: ExecutionPlanMetricsSet,
-    final_: ExecutionPlanMetricsSet,
+    mid: ExecutionPlanMetricsSet,     // 一个是代表过程中
+    final_: ExecutionPlanMetricsSet,   // 一个是代表结束
 }
 
 impl Default for CompositeMetricsSet {
@@ -65,6 +65,8 @@ impl CompositeMetricsSet {
         BaselineMetrics::new(&self.final_, partition)
     }
 
+    /// 在这些指标的基础上追加一个记录内存开销的能力
+
     /// create a new intermediate memory tracking metrics
     pub fn new_intermediate_tracking(
         &self,
@@ -83,6 +85,7 @@ impl CompositeMetricsSet {
         MemTrackingMetrics::new(&self.final_, pool, partition)
     }
 
+    // 将2个时间相加
     fn merge_compute_time(&self, dest: &Time) {
         let time1 = self
             .mid
@@ -112,11 +115,13 @@ impl CompositeMetricsSet {
         dest.add(count2);
     }
 
+    // output_count 只有final才有
     fn merge_output_count(&self, dest: &Count) {
         let count = self.final_.clone_inner().output_rows().map_or(0, |v| v);
         dest.add(count);
     }
 
+    // 取更小值
     fn merge_start_time(&self, dest: &Timestamp) {
         let start1 = self
             .mid

@@ -33,15 +33,19 @@ use std::sync::Arc;
 /// trait to allow expr to typable with respect to a schema
 pub trait ExprSchemable {
     /// given a schema, return the type of the expr
+    /// 目前 ExprSchema只有一种实现 DFSchema 内部包含列信息以及列所在的table信息  本表达式可以在schema中检索到对应列  就得到了数据类型
     fn get_type<S: ExprSchema>(&self, schema: &S) -> Result<DataType>;
 
     /// given a schema, return the nullability of the expr
+    /// 同上 主要是通过schema内的field来判断 列是否可为空
     fn nullable<S: ExprSchema>(&self, input_schema: &S) -> Result<bool>;
 
     /// convert to a field with respect to a schema
+    /// 将表达式转化成某个field  应该就是针对 Column
     fn to_field(&self, input_schema: &DFSchema) -> Result<DFField>;
 
     /// cast to a type with respect to a schema
+    /// 借助schema找到本expr的类型后  再转换成需要的类型
     fn cast_to<S: ExprSchema>(self, cast_to_type: &DataType, schema: &S) -> Result<Expr>;
 }
 
@@ -60,31 +64,44 @@ impl ExprSchemable for Expr {
     /// (e.g. `[utf8] + [bool]`).
     fn get_type<S: ExprSchema>(&self, schema: &S) -> Result<DataType> {
         match self {
+            // Alias内包含列名 可以通过schema检索列 并找到对应的数据类型
             Expr::Alias(expr, name) => match &**expr {
+                // 如果内部表达式是占位符类型  直接使用就好
                 Expr::Placeholder { data_type, .. } => match &data_type {
+                    // 没有的话 通过别名检索field
                     None => schema.data_type(&Column::from_name(name)).cloned(),
                     Some(dt) => Ok(dt.clone()),
                 },
+                // 通过子表达式处理  因为表达式是可以嵌套的  最内层应该是column
                 _ => expr.get_type(schema),
             },
+            // 这些外层表达式无法直接关联到某个数据类型 而是要递归处理内层表达式
             Expr::Sort(Sort { expr, .. }) | Expr::Negative(expr) => expr.get_type(schema),
+
+            // 果然在发现是列的时候 就是通过schema检索列的类型
             Expr::Column(c) => Ok(schema.data_type(c)?.clone()),
             Expr::OuterReferenceColumn(ty, _) => Ok(ty.clone()),
+            // 是一个常量值
             Expr::ScalarVariable(ty, _) => Ok(ty.clone()),
+            // 获取标量值的类型
             Expr::Literal(l) => Ok(l.get_datatype()),
             Expr::Case(case) => {
                 // https://github.com/apache/arrow-datafusion/issues/5821
                 // when #5681 will be fixed, this code can be reverted to:
                 // case.when_then_expr[0].1.get_type(schema)
+                // 获取所有结果类型   then 就是产生结果的表达式
                 let then_types = case
                     .when_then_expr
                     .iter()
                     .map(|when_then| when_then.1.get_type(schema))
                     .collect::<Result<Vec<_>>>()?;
+                // 获取else的类型
                 let else_type = match &case.else_expr {
                     None => Ok(None),
                     Some(expr) => expr.get_type(schema).map(Some),
                 }?;
+
+                // 会推导出一个唯一类型
                 get_coerce_type_for_case_expression(&then_types, else_type.as_ref())
                     .ok_or_else(|| {
                         DataFusionError::Internal(String::from(
@@ -92,6 +109,8 @@ impl ExprSchemable for Expr {
                         ))
                     })
             }
+
+            // 这些外层表达式会更改内部结果类型 所以需要返回外层类型
             Expr::Cast(Cast { data_type, .. })
             | Expr::TryCast(TryCast { data_type, .. }) => Ok(data_type.clone()),
             Expr::ScalarUDF { fun, args } => {
@@ -101,6 +120,8 @@ impl ExprSchemable for Expr {
                     .collect::<Result<Vec<_>>>()?;
                 Ok((fun.return_type)(&data_types)?.as_ref().clone())
             }
+
+            // 返回内建函数的结果
             Expr::ScalarFunction { fun, args } => {
                 let data_types = args
                     .iter()
@@ -108,6 +129,7 @@ impl ExprSchemable for Expr {
                     .collect::<Result<Vec<_>>>()?;
                 function::return_type(fun, &data_types)
             }
+            // 通过窗口函数判断结果
             Expr::WindowFunction(WindowFunction { fun, args, .. }) => {
                 let data_types = args
                     .iter()
@@ -129,6 +151,8 @@ impl ExprSchemable for Expr {
                     .collect::<Result<Vec<_>>>()?;
                 Ok((fun.return_type)(&data_types)?.as_ref().clone())
             }
+
+            // 这些函数都是返回boolean类型
             Expr::Not(_)
             | Expr::IsNull(_)
             | Expr::Exists { .. }
@@ -142,6 +166,8 @@ impl ExprSchemable for Expr {
             | Expr::IsNotTrue(_)
             | Expr::IsNotFalse(_)
             | Expr::IsNotUnknown(_) => Ok(DataType::Boolean),
+
+            // 使用第一个字段的类型  TODO 这样做真的可以吗
             Expr::ScalarSubquery(subquery) => {
                 Ok(subquery.subquery.schema().field(0).data_type().clone())
             }
@@ -160,6 +186,7 @@ impl ExprSchemable for Expr {
             Expr::Placeholder { data_type, .. } => data_type.clone().ok_or_else(|| {
                 DataFusionError::Plan("Placeholder type could not be resolved".to_owned())
             }),
+            // 运行通配符 是没有结果类型的
             Expr::Wildcard => {
                 // Wildcard do not really have a type and do not appear in projections
                 Ok(DataType::Null)
@@ -173,8 +200,9 @@ impl ExprSchemable for Expr {
                 Ok(DataType::Null)
             }
             Expr::GetIndexedField(GetIndexedField { key, expr }) => {
+                // 此时认为内部结果类型应该是一个复杂类型 比如list/struct 总之是可以索引的
                 let data_type = expr.get_type(schema)?;
-
+                // 检索获取子类型
                 get_indexed_field(&data_type, key).map(|x| x.data_type().clone())
             }
         }
@@ -189,14 +217,19 @@ impl ExprSchemable for Expr {
     /// This function errors when it is not possible to compute its
     /// nullability.  This happens when the expression refers to a
     /// column that does not exist in the schema.
+    /// 判断表达式对应的列是否为可空
     fn nullable<S: ExprSchema>(&self, input_schema: &S) -> Result<bool> {
         match self {
+
+            // 这些都是外层函数 nullable保持跟内部一样
             Expr::Alias(expr, _)
             | Expr::Not(expr)
             | Expr::Negative(expr)
             | Expr::Sort(Sort { expr, .. })
             | Expr::InList { expr, .. } => expr.nullable(input_schema),
             Expr::Between(Between { expr, .. }) => expr.nullable(input_schema),
+
+            // 查看列对应的field信息 以判断是否可为空
             Expr::Column(c) => input_schema.nullable(c),
             Expr::OuterReferenceColumn(_, _) => Ok(true),
             Expr::Literal(value) => Ok(value.is_null()),
@@ -207,6 +240,7 @@ impl ExprSchemable for Expr {
                     .iter()
                     .map(|(_, t)| t.nullable(input_schema))
                     .collect::<Result<Vec<_>>>()?;
+                // 只要有任意一种情况为nullable  返回true
                 if then_nullable.contains(&true) {
                     Ok(true)
                 } else if let Some(e) = &case.else_expr {
@@ -270,6 +304,7 @@ impl ExprSchemable for Expr {
     ///
     /// So for example, a projected expression `col(c1) + col(c2)` is
     /// placed in an output field **named** col("c1 + c2")
+    /// 抽取出表达式 得到字段   也就是sql逻辑的组成就是在最基础的expr上不断包装 形成一整套逻辑
     fn to_field(&self, input_schema: &DFSchema) -> Result<DFField> {
         match self {
             Expr::Column(c) => Ok(DFField::new(
@@ -292,6 +327,7 @@ impl ExprSchemable for Expr {
     ///
     /// This function errors when it is impossible to cast the
     /// expression to the target [arrow::datatypes::DataType].
+    /// 解析出expr对应的类型后  转换成目标类型
     fn cast_to<S: ExprSchema>(self, cast_to_type: &DataType, schema: &S) -> Result<Expr> {
         let this_type = self.get_type(schema)?;
         if this_type == *cast_to_type {
@@ -302,11 +338,13 @@ impl ExprSchemable for Expr {
         // like all of the binary expressions below. Perhaps Expr should track the
         // type of the expression?
 
+        // 类型转换的就不细看了
         if can_cast_types(&this_type, cast_to_type) {
             match self {
                 Expr::ScalarSubquery(subquery) => {
                     Ok(Expr::ScalarSubquery(cast_subquery(subquery, cast_to_type)?))
                 }
+                // 套一层 Cast变成新的表达式
                 _ => Ok(Expr::Cast(Cast::new(Box::new(self), cast_to_type.clone()))),
             }
         } else {
@@ -317,8 +355,9 @@ impl ExprSchemable for Expr {
     }
 }
 
-/// cast subquery in InSubquery/ScalarSubquery to a given type.
+/// cast subquery in InSubquery/ScalarSubquery to a given type.  更换子查询中的数据类型
 pub fn cast_subquery(subquery: Subquery, cast_to_type: &DataType) -> Result<Subquery> {
+    // 不需要转换
     if subquery.subquery.schema().field(0).data_type() == cast_to_type {
         return Ok(subquery);
     }
@@ -335,6 +374,7 @@ pub fn cast_subquery(subquery: Subquery, cast_to_type: &DataType) -> Result<Subq
             )?)
         }
         _ => {
+            // 先看简单的情况 就是将内部的col用cast包装了一下
             let cast_expr = Expr::Column(plan.schema().field(0).qualified_column())
                 .cast_to(cast_to_type, subquery.subquery.schema())?;
             LogicalPlan::Projection(Projection::try_new(

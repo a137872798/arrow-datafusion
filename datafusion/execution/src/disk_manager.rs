@@ -30,17 +30,21 @@ use tempfile::{Builder, NamedTempFile, TempDir};
 #[derive(Debug, Clone)]
 pub enum DiskManagerConfig {
     /// Use the provided [DiskManager] instance
+    /// 使用已经存在的manager
     Existing(Arc<DiskManager>),
 
     /// Create a new [DiskManager] that creates temporary files within
     /// a temporary directory chosen by the OS
+    /// 通过os临时申请的目录作为文件管理器
     NewOs,
 
     /// Create a new [DiskManager] that creates temporary files within
     /// the specified directories
+    /// 使用指定路径作为目录的管理器
     NewSpecified(Vec<PathBuf>),
 
     /// Disable disk manager, attempts to create temporary files will error
+    /// 不使用管理器
     Disabled,
 }
 
@@ -69,6 +73,7 @@ impl DiskManagerConfig {
 
 /// Manages files generated during query execution, e.g. spill files generated
 /// while processing dataset larger than available memory.
+/// 实际上就是管理一组目录  临时文件存储在目录下
 #[derive(Debug)]
 pub struct DiskManager {
     /// TempDirs to put temporary files in.
@@ -82,7 +87,9 @@ impl DiskManager {
     /// Create a DiskManager given the configuration
     pub fn try_new(config: DiskManagerConfig) -> Result<Arc<Self>> {
         match config {
+            // 使用已经存在的
             DiskManagerConfig::Existing(manager) => Ok(manager),
+            // 通过os的临时目录 也就是不用手动指定
             DiskManagerConfig::NewOs => Ok(Arc::new(Self {
                 local_dirs: Mutex::new(Some(vec![])),
             })),
@@ -106,8 +113,10 @@ impl DiskManager {
     ///
     /// If the file can not be created for some reason, returns an
     /// error message referencing the request description
+    /// 使用管理器创建临时文件
     pub fn create_tmp_file(&self, request_description: &str) -> Result<NamedTempFile> {
         let mut guard = self.local_dirs.lock();
+        // 无目录 代表不支持
         let local_dirs = guard.as_mut().ok_or_else(|| {
             DataFusionError::ResourcesExhausted(format!(
                 "Memory Exhausted while {request_description} (DiskManager is disabled)"
@@ -115,6 +124,7 @@ impl DiskManager {
         })?;
 
         // Create a temporary directory if needed
+        // 对应NewOs
         if local_dirs.is_empty() {
             let tempdir = tempfile::tempdir().map_err(DataFusionError::IoError)?;
 
@@ -135,6 +145,7 @@ impl DiskManager {
 }
 
 /// Setup local dirs by creating one new dir in each of the given dirs
+/// 基于路径产生临时目录
 fn create_local_dirs(local_dirs: Vec<PathBuf>) -> Result<Vec<TempDir>> {
     local_dirs
         .iter()

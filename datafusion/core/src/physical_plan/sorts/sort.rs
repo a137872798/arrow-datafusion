@@ -69,9 +69,12 @@ use tokio::task;
 /// 2.2 if the memory threshold is reached, sort all buffered batches and spill to file.
 ///     buffer the batch in memory, go to 1.
 /// 3. when input is exhausted, merge all in memory batches and spills to get a total order.
+/// 该对象用于对数据集排序
 struct ExternalSorter {
     schema: SchemaRef,
+    /// 每批收到的数据 我们都会先进行排序 并暂存在内存中  在最后需要导出数据时 在做一次排序
     in_mem_batches: Vec<BatchWithSortArray>,
+    /// 内存不足时 需要一些临时文件辅助
     spills: Vec<NamedTempFile>,
     /// Sort expressions
     expr: Vec<PhysicalSortExpr>,
@@ -86,9 +89,9 @@ struct ExternalSorter {
 
 impl ExternalSorter {
     pub fn new(
-        partition_id: usize,
+        partition_id: usize,  // 针对某个分区创建的排序对象   但是不是有将所有分区数据合并后再排序的选择吗
         schema: SchemaRef,
-        expr: Vec<PhysicalSortExpr>,
+        expr: Vec<PhysicalSortExpr>,  // 排序列
         metrics_set: CompositeMetricsSet,
         session_config: Arc<SessionConfig>,
         runtime: Arc<RuntimeEnv>,
@@ -115,11 +118,13 @@ impl ExternalSorter {
         }
     }
 
+    // 添加数据集
     async fn insert_batch(
         &mut self,
         input: RecordBatch,
         tracking_metrics: &MemTrackingMetrics,
     ) -> Result<()> {
+
         if input.num_rows() > 0 {
             let size = batch_byte_size(&input);
             if self.reservation.try_grow(size).is_err() {
@@ -131,11 +136,14 @@ impl ExternalSorter {
             // NB timer records time taken on drop, so there are no
             // calls to `timer.done()` below.
             let _timer = tracking_metrics.elapsed_compute().timer();
+
+            // 对单个数据集进行排序  得到该数据集的排序结果 已经排序后的排序列
             let partial = sort_batch(input, self.schema.clone(), &self.expr, self.fetch)?;
 
             // The resulting batch might be smaller (or larger, see #3747) than the input
             // batch due to either a propagated limit or the re-construction of arrays. So
             // for being reliable, we need to reflect the memory usage of the partial batch.
+            // 评估这个临时的数据集需要占用多少内存
             let new_size = batch_byte_size(&partial.sorted_batch);
             match new_size.cmp(&size) {
                 Ordering::Greater => {
@@ -154,6 +162,8 @@ impl ExternalSorter {
                 }
                 Ordering::Equal => {}
             }
+
+            // 将结果暂存起来
             self.in_mem_batches.push(partial);
         }
         Ok(())
@@ -164,9 +174,11 @@ impl ExternalSorter {
     }
 
     /// MergeSort in mem batches as well as spills into total order with `SortPreservingMergeStream`.
+    /// 对维护在内存中的数据集做一次排序处理 并产生一个stream
     fn sort(&mut self) -> Result<SendableRecordBatchStream> {
         let batch_size = self.session_config.batch_size();
 
+        // 代表由于内存不足 使用了额外的文件
         if self.spilled_before() {
             let intermediate_metrics = self
                 .metrics_set
@@ -176,6 +188,8 @@ impl ExternalSorter {
                 .new_final_tracking(self.partition_id, &self.runtime.memory_pool);
 
             let mut streams = vec![];
+
+            // 先处理本次内存中的数据
             if !self.in_mem_batches.is_empty() {
                 let in_mem_stream = in_mem_partial_sort(
                     &mut self.in_mem_batches,
@@ -190,11 +204,13 @@ impl ExternalSorter {
                 streams.push(in_mem_stream);
             }
 
+            // 加载文件中的数据
             for spill in self.spills.drain(..) {
                 let stream = read_spill_as_stream(spill, self.schema.clone())?;
                 streams.push(stream);
             }
 
+            // 合并多个stream的数据
             streaming_merge(
                 streams,
                 self.schema.clone(),
@@ -202,10 +218,14 @@ impl ExternalSorter {
                 merge_metrics,
                 self.session_config.batch_size(),
             )
+
+            // 处理之前每批排序好的数据
         } else if !self.in_mem_batches.is_empty() {
             let tracking_metrics = self
                 .metrics_set
                 .new_final_tracking(self.partition_id, &self.runtime.memory_pool);
+
+            // 处理 in_mem_batches 数据
             let result = in_mem_partial_sort(
                 &mut self.in_mem_batches,
                 self.schema.clone(),
@@ -214,7 +234,7 @@ impl ExternalSorter {
                 tracking_metrics,
                 self.fetch,
             );
-            // Report to the memory manager we are no longer using memory
+            // Report to the memory manager we are no longer using memory  此时已经完成排序了 不再需要管理内存
             self.reservation.free();
             result
         } else {
@@ -234,6 +254,7 @@ impl ExternalSorter {
         self.metrics.spill_count().value()
     }
 
+    // 代表申请的内存不够用了
     async fn spill(&mut self) -> Result<usize> {
         // we could always get a chance to free some memory as long as we are holding some
         if self.in_mem_batches.is_empty() {
@@ -246,7 +267,10 @@ impl ExternalSorter {
             .metrics_set
             .new_intermediate_tracking(self.partition_id, &self.runtime.memory_pool);
 
+        // 创建临时文件
         let spillfile = self.runtime.disk_manager.create_tmp_file("Sorting")?;
+
+        // 先处理内存中的数据 生成数据流  产出的数据就是排序好的数据
         let stream = in_mem_partial_sort(
             &mut self.in_mem_batches,
             self.schema.clone(),
@@ -256,6 +280,7 @@ impl ExternalSorter {
             self.fetch,
         );
 
+        // 将数据先写入到文件中
         spill_partial_sorted_stream(&mut stream?, spillfile.path(), self.schema.clone())
             .await?;
         self.reservation.free();
@@ -277,16 +302,18 @@ impl Debug for ExternalSorter {
 }
 
 /// consume the non-empty `sorted_batches` and do in_mem_sort
+/// 处理 in_mem的数据
 fn in_mem_partial_sort(
-    buffered_batches: &mut Vec<BatchWithSortArray>,
+    buffered_batches: &mut Vec<BatchWithSortArray>,  // 之前每批排序好的数据
     schema: SchemaRef,
-    expressions: &[PhysicalSortExpr],
+    expressions: &[PhysicalSortExpr],   //  排序列
     batch_size: usize,
     tracking_metrics: MemTrackingMetrics,
     fetch: Option<usize>,
 ) -> Result<SendableRecordBatchStream> {
     assert_ne!(buffered_batches.len(), 0);
     if buffered_batches.len() == 1 {
+        // 只有一批数据直接包装成stream就好
         let result = buffered_batches.pop();
         Ok(Box::pin(SizedRecordBatchStream::new(
             schema,
@@ -294,6 +321,8 @@ fn in_mem_partial_sort(
             tracking_metrics,
         )))
     } else {
+
+        // 提取出排序完的 排序列以及数据集
         let (sorted_arrays, batches): (Vec<Vec<ArrayRef>>, Vec<RecordBatch>) =
             buffered_batches
                 .drain(..)
@@ -306,6 +335,7 @@ fn in_mem_partial_sort(
                 })
                 .unzip();
 
+        // 得到的迭代器 每次迭代可以得到 已经排序完的长度为batch_size的数据
         let sorted_iter = {
             // NB timer records time taken on drop, so there are no
             // calls to `timer.done()` below.
@@ -321,23 +351,27 @@ fn in_mem_partial_sort(
     }
 }
 
+// 一个下标对象
 #[derive(Debug, Copy, Clone)]
 struct CompositeIndex {
-    batch_idx: u32,
-    row_idx: u32,
+    batch_idx: u32,  // 描述该下标对应第几批数据集
+    row_idx: u32,  // 对应该数据集下的第几行
 }
 
 /// Get sorted iterator by sort concatenated `SortColumn`s
 fn get_sorted_iter(
-    sort_arrays: &[Vec<ArrayRef>],
-    expr: &[PhysicalSortExpr],
+    sort_arrays: &[Vec<ArrayRef>],  //  对应每批排序好的排序键的值
+    expr: &[PhysicalSortExpr],   // 描述排序规则
     batch_size: usize,
     fetch: Option<usize>,
 ) -> Result<SortedIterator> {
+
+    // index对应已经排序完的某批数据集的某行
     let row_indices = sort_arrays
         .iter()
         .enumerate()
         .flat_map(|(i, arrays)| {
+            // 为每批每行数据 生成Index对象
             (0..arrays[0].len()).map(move |r| CompositeIndex {
                 // since we original use UInt32Array to index the combined mono batch,
                 // component record batches won't overflow as well,
@@ -348,23 +382,31 @@ fn get_sorted_iter(
         })
         .collect::<Vec<CompositeIndex>>();
 
+    // 将多个数据集下相同排序列的值 纵向排列
     let sort_columns = expr
         .iter()
         .enumerate()
+        // i 对应的是每个排序列
         .map(|(i, expr)| {
+            // 拿到每批数据集该排序列的值
             let columns_i = sort_arrays
                 .iter()
                 .map(|cs| cs[i].as_ref())
                 .collect::<Vec<&dyn Array>>();
+
+            // 纵向累加
             Ok(SortColumn {
                 values: concat(columns_i.as_slice())?,
                 options: Some(expr.options),
             })
         })
         .collect::<Result<Vec<_>>>()?;
+
+    // 对纵向拼接后的排序列进行重新排序 返回的排序后的行号
     let indices = lexsort_to_indices(&sort_columns, fetch)?;
 
     // Calculate composite index based on sorted indices
+    // i 就是行号呀   也就是 batch_idx * row_idx
     let row_indices = indices
         .values()
         .iter()
@@ -375,11 +417,11 @@ fn get_sorted_iter(
 }
 
 struct SortedIterator {
-    /// Current logical position in the iterator
+    /// Current logical position in the iterator  已经读取过多少数据
     pos: usize,
-    /// Sorted composite index of where to find the rows in buffered batches
+    /// Sorted composite index of where to find the rows in buffered batches  存储的是排序好的行号 通过index的batch_idx/row_idx 可以从数据集中回查原纪录
     composite: Vec<CompositeIndex>,
-    /// Maximum batch size to produce
+    /// Maximum batch size to produce  单次返回的行数
     batch_size: usize,
 }
 
@@ -402,7 +444,9 @@ impl Iterator for SortedIterator {
 
     /// Emit a max of `batch_size` positions each time
     fn next(&mut self) -> Option<Self::Item> {
+        // 这里代表总长度
         let length = self.composite.len();
+        // 所有数据都已经被使用过
         if self.pos >= length {
             return None;
         }
@@ -411,15 +455,20 @@ impl Iterator for SortedIterator {
 
         // Combine adjacent indexes from the same batch to make a slice,
         // for more efficient `extend` later.
+        // pos能够找到下标  而下标中的batch_idx/row_idx 可以从之前排序好的数据集定位到行数据
         let mut last_batch_idx = self.composite[self.pos].batch_idx;
         let mut indices_in_batch = Vec::with_capacity(current_size);
 
+        // 存储排序结果
         let mut slices = vec![];
+        // 遍历index
         for ci in &self.composite[self.pos..self.pos + current_size] {
             if ci.batch_idx != last_batch_idx {
+                // 将连续的顺序数据 变成slice装入vec中
                 group_indices(last_batch_idx, &mut indices_in_batch, &mut slices);
                 last_batch_idx = ci.batch_idx;
             }
+            // 当切换batch时 才一次性加载数据
             indices_in_batch.push(ci.row_idx);
         }
 
@@ -436,26 +485,34 @@ impl Iterator for SortedIterator {
 
 /// Group continuous indices into a slice for better `extend` performance
 fn group_indices(
-    batch_idx: u32,
-    positions: &mut Vec<u32>,
-    output: &mut Vec<CompositeSlice>,
+    batch_idx: u32,   // 上次使用的batch_idx
+    positions: &mut Vec<u32>,   // 存储该batch下需要读取的行号
+    output: &mut Vec<CompositeSlice>,  //
 ) {
+    // 对positions排序
     positions.sort_unstable();
+
+    // 记录上次出现的位置
     let mut last_pos = 0;
     let mut run_length = 0;
     for pos in positions.iter() {
         if run_length == 0 {
             last_pos = *pos;
             run_length = 1;
+            // 代表数据是连续的
         } else if *pos == last_pos + 1 {
             run_length += 1;
             last_pos = *pos;
         } else {
+            // 当发现不连续的数据时   才触发push    连续出现的数据作为一个slice
             output.push(CompositeSlice {
-                batch_idx,
+                batch_idx,  // 数据所在的batch
+                // 下面2个字段 框出一个行范围
                 start_row_idx: last_pos + 1 - run_length,
                 len: run_length as usize,
             });
+
+            // 更新起点
             last_pos = *pos;
             run_length = 1;
         }
@@ -472,12 +529,12 @@ fn group_indices(
     positions.clear()
 }
 
-/// Stream of sorted record batches
+/// Stream of sorted record batches  通过该对象读取排序完的数据
 struct SortedSizedRecordBatchStream {
     schema: SchemaRef,
-    batches: Vec<RecordBatch>,
-    sorted_iter: SortedIterator,
-    num_cols: usize,
+    batches: Vec<RecordBatch>,  // 对应之前排序好的数据集
+    sorted_iter: SortedIterator,  // 迭代会返回排序好的数据所在的batch/row 需要回到batches检索数据
+    num_cols: usize,  // 共有多少列
     metrics: MemTrackingMetrics,
 }
 
@@ -510,10 +567,14 @@ impl Stream for SortedSizedRecordBatchStream {
         mut self: std::pin::Pin<&mut Self>,
         _: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        // 遍历存储排序顺序的迭代器
         match self.sorted_iter.next() {
             None => Poll::Ready(None),
             Some(slices) => {
+
+                // 代表连续的多少行
                 let num_rows = slices.iter().map(|s| s.len).sum();
+                // 将每个col对应的Array组合起来得到结果集
                 let output = (0..self.num_cols)
                     .map(|i| {
                         let arrays = self
@@ -521,15 +582,19 @@ impl Stream for SortedSizedRecordBatchStream {
                             .iter()
                             .map(|b| b.column(i).to_data())
                             .collect::<Vec<_>>();
+
+                        // 得到该列在每批数据集下的数据
                         let arrays = arrays.iter().collect();
                         let mut mutable = MutableArrayData::new(arrays, false, num_rows);
                         for x in slices.iter() {
+                            // 代表将该位置的数据填充到mutable中
                             mutable.extend(
                                 x.batch_idx as usize,
                                 x.start_row_idx as usize,
                                 x.start_row_idx as usize + x.len,
                             );
                         }
+                        // 最后只会生成一个Array
                         make_array(mutable.freeze())
                     })
                     .collect::<Vec<_>>();
@@ -554,6 +619,7 @@ impl RecordBatchStream for SortedSizedRecordBatchStream {
     }
 }
 
+// 排序时 内存中可能会存有大量数据
 async fn spill_partial_sorted_stream(
     in_mem_stream: &mut SendableRecordBatchStream,
     path: &Path,
@@ -561,7 +627,10 @@ async fn spill_partial_sorted_stream(
 ) -> Result<()> {
     let (sender, receiver) = tokio::sync::mpsc::channel(2);
     let path: PathBuf = path.into();
+
+    // 开启一个后台线程 接收者将数据写入到文件
     let handle = task::spawn_blocking(move || write_sorted(receiver, path, schema));
+    // 将数据写入
     while let Some(item) = in_mem_stream.next().await {
         sender.send(item).await.ok();
     }
@@ -592,6 +661,7 @@ fn read_spill_as_stream(
     ))
 }
 
+// 将数据写入文件
 fn write_sorted(
     mut receiver: Receiver<Result<RecordBatch>>,
     path: PathBuf,
@@ -631,11 +701,13 @@ pub struct SortExec {
     /// Input schema
     pub(crate) input: Arc<dyn ExecutionPlan>,
     /// Sort expressions
+    /// 排序键
     expr: Vec<PhysicalSortExpr>,
     /// Containing all metrics set created during sort
     metrics_set: CompositeMetricsSet,
     /// Preserve partitions of input plan. If false, the input partitions
     /// will be sorted and merged into a single output partition.
+    /// 是否要保持分区的状态
     preserve_partitioning: bool,
     /// Fetch highest/lowest n results
     fetch: Option<usize>,
@@ -654,6 +726,7 @@ impl SortExec {
 
     /// Create a new sort execution plan that produces a single,
     /// sorted output partition.
+    /// 通过一组排序键实现排序功能
     pub fn new(expr: Vec<PhysicalSortExpr>, input: Arc<dyn ExecutionPlan>) -> Self {
         Self {
             expr,
@@ -693,12 +766,14 @@ impl SortExec {
     ///
     /// If `preserve_partitioning` is false, sorts and merges all
     /// input partitions producing a single, sorted partition.
+    /// true 代表每个分区分开排序     false 代表将分区数据合并后再排序
     pub fn with_preserve_partitioning(mut self, preserve_partitioning: bool) -> Self {
         self.preserve_partitioning = preserve_partitioning;
         self
     }
 
     /// Whether this `SortExec` preserves partitioning of the children
+    /// 指定拉取的数量
     pub fn with_fetch(mut self, fetch: Option<usize>) -> Self {
         self.fetch = fetch;
         self
@@ -731,9 +806,11 @@ impl ExecutionPlan for SortExec {
 
     /// Get the output partitioning of this plan
     fn output_partitioning(&self) -> Partitioning {
+        // 保持分区状态
         if self.preserve_partitioning {
             self.input.output_partitioning()
         } else {
+            // 最终只有一个分区
             Partitioning::UnknownPartitioning(1)
         }
     }
@@ -788,6 +865,7 @@ impl ExecutionPlan for SortExec {
         Ok(Arc::new(new_sort))
     }
 
+    // 将排序逻辑包装在input产生的结果集上
     fn execute(
         &self,
         partition: usize,
@@ -804,6 +882,7 @@ impl ExecutionPlan for SortExec {
 
         debug!("End SortExec's input.execute for partition: {}", partition);
 
+        // 从包装后的流读取到的数据 自动完成了排序
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
             futures::stream::once(do_sort(
@@ -846,21 +925,27 @@ impl ExecutionPlan for SortExec {
 }
 
 struct BatchWithSortArray {
+    // 排序列在排序后的状态
     sort_arrays: Vec<ArrayRef>,
+    // 排序后的数据集
     sorted_batch: RecordBatch,
 }
 
+// 对数据集进行排序
 fn sort_batch(
     batch: RecordBatch,
     schema: SchemaRef,
     expr: &[PhysicalSortExpr],
     fetch: Option<usize>,
 ) -> Result<BatchWithSortArray> {
+
+    // 取出排序列数据 搭配排序option
     let sort_columns = expr
         .iter()
         .map(|e| e.evaluate_to_sort_column(&batch))
         .collect::<Result<Vec<SortColumn>>>()?;
 
+    // TODO 排序逻辑由arrow-ord包实现  不细看了 返回的是排序完后的行号
     let indices = lexsort_to_indices(&sort_columns, fetch)?;
 
     // reorder all rows based on sorted indices
@@ -869,6 +954,7 @@ fn sort_batch(
         batch
             .columns()
             .iter()
+            // 按照行号读取每列的数据 并拼接成数据集
             .map(|column| {
                 take(
                     column.as_ref(),
@@ -883,6 +969,7 @@ fn sort_batch(
             .collect::<Result<Vec<ArrayRef>, ArrowError>>()?,
     )?;
 
+    // 排序列在排序后的数据
     let sort_arrays = sort_columns
         .into_iter()
         .map(|sc| {
@@ -902,13 +989,14 @@ fn sort_batch(
     })
 }
 
+// 对数据集进行排序
 async fn do_sort(
-    mut input: SendableRecordBatchStream,
+    mut input: SendableRecordBatchStream,  // 数据集
     partition_id: usize,
-    expr: Vec<PhysicalSortExpr>,
+    expr: Vec<PhysicalSortExpr>,  // 分区键
     metrics_set: CompositeMetricsSet,
     context: Arc<TaskContext>,
-    fetch: Option<usize>,
+    fetch: Option<usize>,  // 代表要获取多少条记录
 ) -> Result<SendableRecordBatchStream> {
     debug!(
         "Start do_sort for partition {} of context session_id {} and task_id {:?}",
@@ -919,6 +1007,8 @@ async fn do_sort(
     let schema = input.schema();
     let tracking_metrics =
         metrics_set.new_intermediate_tracking(partition_id, context.memory_pool());
+
+    // 排序逻辑由该对象提供
     let mut sorter = ExternalSorter::new(
         partition_id,
         schema.clone(),
@@ -928,10 +1018,14 @@ async fn do_sort(
         context.runtime_env(),
         fetch,
     );
+
     while let Some(batch) = input.next().await {
         let batch = batch?;
+        // 将数据填充到排序对象中   可以看到这里是将input的所有数据都加载出来了  毕竟为了排序的效果 肯定是要在内存中装载全部数据的
         sorter.insert_batch(batch, &tracking_metrics).await?;
     }
+
+    // 生成排序结果
     let result = sorter.sort();
     debug!(
         "End do_sort for partition {} of context session_id {} and task_id {:?}",

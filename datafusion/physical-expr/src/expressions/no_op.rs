@@ -63,6 +63,7 @@ impl PhysicalExpr for NoOp {
         Ok(true)
     }
 
+    /// Noop无法被调用
     fn evaluate(&self, _batch: &RecordBatch) -> Result<ColumnarValue> {
         Err(DataFusionError::Plan(
             "NoOp::evaluate() should not be called".to_owned(),

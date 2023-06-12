@@ -47,6 +47,7 @@ impl AggregateStatistics {
     }
 }
 
+// 优化执行计划
 impl PhysicalOptimizerRule for AggregateStatistics {
     fn optimize(
         &self,

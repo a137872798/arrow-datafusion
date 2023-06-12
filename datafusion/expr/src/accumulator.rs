@@ -29,7 +29,7 @@ use std::fmt::Debug;
 /// * retract an update to its state from given inputs via `retract_batch`
 /// * convert its internal state to a vector of aggregate values
 /// * update its state from multiple accumulators' states via `merge_batch`
-/// * compute the final value from its internal state via `evaluate`
+/// * compute the final value from its internal state via `evaluate`   累加器
 pub trait Accumulator: Send + Sync + Debug {
     /// Returns the partial intermediate state of the accumulator. This
     /// partial state is serialied as `Arrays` and then combined with
@@ -49,10 +49,10 @@ pub trait Accumulator: Send + Sync + Debug {
     ///
     /// `ScalarValue::List` can also be used to pass multiple values
     /// if the number of intermediate values is not known at planning
-    /// time (e.g. median)
+    /// time (e.g. median)   累加器可能需要保存多个状态 这些状态有助于完成累加动作
     fn state(&self) -> Result<Vec<ScalarValue>>;
 
-    /// Updates the accumulator's state from a vector of arrays.
+    /// Updates the accumulator's state from a vector of arrays.  通过一组新数据 更新累加值
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()>;
 
     /// Retracts an update (caused by the given inputs) to
@@ -60,7 +60,7 @@ pub trait Accumulator: Send + Sync + Debug {
     ///
     /// This is the inverse operation of [`Self::update_batch`] and is used
     /// to incrementally calculate window aggregates where the OVER
-    /// clause defines a bounded window.
+    /// clause defines a bounded window.    当AggregateExpr.supports_bounded_execution为true时  要实现该方法
     fn retract_batch(&mut self, _values: &[ArrayRef]) -> Result<()> {
         // TODO add retract for all accumulators
         Err(DataFusionError::Internal(
@@ -75,14 +75,14 @@ pub trait Accumulator: Send + Sync + Debug {
     /// results of calling `[state]` on zero or more other accumulator
     /// instances.
     ///
-    /// `states`  is an array of the same types as returned by [`Self::state`]
+    /// `states`  is an array of the same types as returned by [`Self::state`]  通过状态来更新 而非数据
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()>;
 
-    /// Returns the final aggregate value based on its current state.
+    /// Returns the final aggregate value based on its current state.   返回最后的累加值
     fn evaluate(&self) -> Result<ScalarValue>;
 
     /// Allocated size required for this accumulator, in bytes, including `Self`.
     /// Allocated means that for internal containers such as `Vec`, the `capacity` should be used
-    /// not the `len`
+    /// not the `len`  需要的内存
     fn size(&self) -> usize;
 }

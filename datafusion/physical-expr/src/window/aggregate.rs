@@ -41,11 +41,16 @@ use crate::{expressions::PhysicalSortExpr, AggregateExpr, PhysicalExpr};
 /// e.g cumulative window frames uses `PlainAggregateWindowExpr`. Where as Aggregate Window Expressions
 /// that have the form `OVER({ROWS | RANGE| GROUPS} BETWEEN M {PRECEDING| FOLLOWING} AND ...)`
 /// e.g sliding window frames uses `SlidingAggregateWindowExpr`.
+/// 当window_frame.start_bound 是无界的时候  生成该对象
 #[derive(Debug)]
 pub struct PlainAggregateWindowExpr {
+    // 聚合表达式  划入同一个window的列数据通过该聚合函数进行聚合
     aggregate: Arc<dyn AggregateExpr>,
+    // 通过这组表达式可以得到一组分区键
     partition_by: Vec<Arc<dyn PhysicalExpr>>,
+    // 通过其处理后 可以对结果列排序
     order_by: Vec<PhysicalSortExpr>,
+    // 描述窗口大小
     window_frame: Arc<WindowFrame>,
 }
 
@@ -80,6 +85,7 @@ impl WindowExpr for PlainAggregateWindowExpr {
         self
     }
 
+    /// 用于描述聚合结果的字段
     fn field(&self) -> Result<Field> {
         self.aggregate.field()
     }
@@ -88,10 +94,12 @@ impl WindowExpr for PlainAggregateWindowExpr {
         self.aggregate.name()
     }
 
+    /// 内部表达式
     fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>> {
         self.aggregate.expressions()
     }
 
+    // 将数据集进行聚合后返回
     fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
         self.aggregate_evaluate(batch)
     }
@@ -114,6 +122,7 @@ impl WindowExpr for PlainAggregateWindowExpr {
                     DataFusionError::Execution("Cannot find state".to_string())
                 })?;
             let mut state = &mut window_state.state;
+            // 这是什么意思啊  将start推进到end-1的位置
             if self.window_frame.start_bound.is_unbounded() {
                 state.window_frame_range.start =
                     state.window_frame_range.end.saturating_sub(1);
@@ -171,24 +180,27 @@ impl AggregateWindowExpr for PlainAggregateWindowExpr {
     // We assume that `cur_range` contains `last_range` and their start points
     // are same. In summary if `last_range` is `Range{start: a,end: b}` and
     // `cur_range` is `Range{start: a1, end: b1}`, it is guaranteed that a1=a and b1>=b.
+    // 产生聚合结果
     fn get_aggregate_result_inside_range(
         &self,
-        last_range: &Range<usize>,
-        cur_range: &Range<usize>,
-        value_slice: &[ArrayRef],
+        last_range: &Range<usize>,  // 上次聚合的数据范围
+        cur_range: &Range<usize>,   // 本次聚合的数据范围
+        value_slice: &[ArrayRef],   // 参与聚合的参数
         accumulator: &mut Box<dyn Accumulator>,
     ) -> Result<ScalarValue> {
+        // 本次范围为空 没有数据
         let value = if cur_range.start == cur_range.end {
             // We produce None if the window is empty.
             ScalarValue::try_from(self.aggregate.field()?.data_type())?
         } else {
-            // Accumulate any new rows that have entered the window:
+            // Accumulate any new rows that have entered the window:    这不需要考虑start
             let update_bound = cur_range.end - last_range.end;
             // A non-sliding aggregation only processes new data, it never
             // deals with expiring data as its starting point is always the
             // same point (i.e. the beginning of the table/frame). Hence, we
             // do not call `retract_batch`.
             if update_bound > 0 {
+                // 相关列的这些行数据 通过累加器进行累加
                 let update: Vec<ArrayRef> = value_slice
                     .iter()
                     .map(|v| v.slice(last_range.end, update_bound))

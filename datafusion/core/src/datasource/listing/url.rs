@@ -28,6 +28,7 @@ use url::Url;
 
 /// A parsed URL identifying files for a listing table, see [`ListingTableUrl::parse`]
 /// for more information on the supported expressions
+/// 对应某分区数据文件的目录路径
 #[derive(Debug, Clone)]
 pub struct ListingTableUrl {
     /// A URL that identifies a file or directory to list files from
@@ -81,6 +82,7 @@ impl ListingTableUrl {
         }
 
         match Url::parse(s) {
+            // 解析url成功 直接返回
             Ok(url) => Ok(Self::new(url, None)),
             Err(url::ParseError::RelativeUrlWithoutBase) => Self::parse_path(s),
             Err(e) => Err(DataFusionError::External(Box::new(e))),
@@ -112,6 +114,7 @@ impl ListingTableUrl {
     }
 
     /// Creates a new [`ListingTableUrl`] from a url and optional glob expression
+    /// 通过一个url和一组正则初始化一个 tableUrl清单
     fn new(url: Url, glob: Option<Pattern>) -> Self {
         let decoded_path =
             percent_encoding::percent_decode_str(url.path()).decode_utf8_lossy();
@@ -140,6 +143,7 @@ impl ListingTableUrl {
     }
 
     /// List all files identified by this [`ListingTableUrl`] for the provided `file_extension`
+    /// 找到某个路径下使用该拓展名的所有文件
     pub(crate) fn list_all_files<'a>(
         &'a self,
         store: &'a dyn ObjectStore,
@@ -155,6 +159,7 @@ impl ListingTableUrl {
         };
 
         list.map_err(Into::into)
+            // 遍历每个数据文件
             .try_filter(move |meta| {
                 let path = &meta.location;
                 let extension_match = path.as_ref().ends_with(file_extension);

@@ -52,12 +52,12 @@ use datafusion_physical_expr::equivalence::project_equivalence_properties;
 pub use datafusion_physical_expr::expressions::create_aggregate_expr;
 use datafusion_physical_expr::normalize_out_expr_with_alias_schema;
 
-/// Hash aggregate modes
+/// Hash aggregate modes   数据聚合方式
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AggregateMode {
     /// Partial aggregate that can be applied in parallel across input partitions
     Partial,
-    /// Final aggregate that produces a single partition of output
+    /// Final aggregate that produces a single partition of output    代表聚合结果是单分区的
     Final,
     /// Final aggregate that works on pre-partitioned data.
     ///
@@ -91,6 +91,7 @@ pub enum AggregateMode {
 #[derive(Clone, Debug, Default)]
 pub struct PhysicalGroupBy {
     /// Distinct (Physical Expr, Alias) in the grouping set
+    /// 分组相关的列 string代表别名
     expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
     /// Corresponding NULL expressions for expr
     null_expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
@@ -98,6 +99,7 @@ pub struct PhysicalGroupBy {
     /// composed of either one of the group expressions in expr or a null
     /// expression in null_expr. If `groups[i][j]` is true, then the the
     /// j-th expression in the i-th group is NULL, otherwise it is `expr[j]`.
+    /// 这个bool 代表is_null
     groups: Vec<Vec<bool>>,
 }
 
@@ -117,21 +119,24 @@ impl PhysicalGroupBy {
 
     /// Create a GROUPING SET with only a single group. This is the "standard"
     /// case when building a plan from an expression such as `GROUP BY a,b,c`
+    /// expr 对应分组使用的col  string对应expr名字
     pub fn new_single(expr: Vec<(Arc<dyn PhysicalExpr>, String)>) -> Self {
         let num_exprs = expr.len();
         Self {
             expr,
             null_expr: vec![],
+            // 最外层内一个元素  内部创建跟expr等量的false
             groups: vec![vec![false; num_exprs]],
         }
     }
 
     /// Returns true if this GROUP BY contains NULL expressions
+    /// groups中有任何true 就代表包含null值
     pub fn contains_null(&self) -> bool {
         self.groups.iter().flatten().any(|is_null| *is_null)
     }
 
-    /// Returns the group expressions
+    /// Returns the group expressions   返回分组表达式 (一般也就是column 代表基于该列进行分组)
     pub fn expr(&self) -> &[(Arc<dyn PhysicalExpr>, String)] {
         &self.expr
     }
@@ -141,7 +146,7 @@ impl PhysicalGroupBy {
         &self.null_expr
     }
 
-    /// Returns the group null masks
+    /// Returns the group null masks    返回标记为null的掩码
     pub fn groups(&self) -> &[Vec<bool>] {
         &self.groups
     }
@@ -170,6 +175,7 @@ impl PartialEq for PhysicalGroupBy {
     }
 }
 
+// 有不同的数据流类型
 enum StreamType {
     AggregateStream(AggregateStream),
     GroupedHashAggregateStream(GroupedHashAggregateStream),
@@ -184,42 +190,47 @@ impl From<StreamType> for SendableRecordBatchStream {
     }
 }
 
-/// Hash aggregate execution plan
+/// Hash aggregate execution plan   聚合执行计划
 #[derive(Debug)]
 pub struct AggregateExec {
-    /// Aggregation mode (full, partial)
+    /// Aggregation mode (full, partial)    描述了聚合的模式
     pub(crate) mode: AggregateMode,
-    /// Group by expressions
+    /// Group by expressions          分组表达式 或者说如何分组
     pub(crate) group_by: PhysicalGroupBy,
-    /// Aggregate expressions
+    /// Aggregate expressions          聚合表达式
     pub(crate) aggr_expr: Vec<Arc<dyn AggregateExpr>>,
-    /// FILTER (WHERE clause) expression for each aggregate expression
+    /// FILTER (WHERE clause) expression for each aggregate expression   对数据集进行过滤  过滤器和聚合表达式还是一一对应的
     pub(crate) filter_expr: Vec<Option<Arc<dyn PhysicalExpr>>>,
-    /// Input plan, could be a partial aggregate or the input to the aggregate
+    /// Input plan, could be a partial aggregate or the input to the aggregate    聚合也是一种包装 需要通过input拿到数据
     pub(crate) input: Arc<dyn ExecutionPlan>,
     /// Schema after the aggregate is applied
+    /// 该schema中 只包含分组键 以及聚合会用到的field
     schema: SchemaRef,
     /// Input schema before any aggregation is applied. For partial aggregate this will be the
     /// same as input.schema() but for the final aggregate it will be the same as the input
-    /// to the partial aggregate
+    /// to the partial aggregate       聚合前数据的schema
     pub(crate) input_schema: SchemaRef,
     /// The alias map used to normalize out expressions like Partitioning and PhysicalSortExpr
     /// The key is the column from the input schema and the values are the columns from the output schema
+    /// 原分组列  在新的schema下的名字和下标
     alias_map: HashMap<Column, Vec<Column>>,
-    /// Execution Metrics
+    /// Execution Metrics    存储执行过程中的指标信息
     metrics: ExecutionPlanMetricsSet,
 }
 
 impl AggregateExec {
+
     /// Create a new hash aggregate execution plan
     pub fn try_new(
         mode: AggregateMode,
-        group_by: PhysicalGroupBy,
-        aggr_expr: Vec<Arc<dyn AggregateExpr>>,
-        filter_expr: Vec<Option<Arc<dyn PhysicalExpr>>>,
+        group_by: PhysicalGroupBy,  // 内部包含分组相关的物理表达式
+        aggr_expr: Vec<Arc<dyn AggregateExpr>>,   // 物理聚合表达式 内部有聚合逻辑
+        filter_expr: Vec<Option<Arc<dyn PhysicalExpr>>>,  // 起到过滤作用
         input: Arc<dyn ExecutionPlan>,
         input_schema: SchemaRef,
     ) -> Result<Self> {
+
+        // 根据分组用到的field 以及聚合函数的结果field 产生新的schema
         let schema = create_schema(
             &input.schema(),
             &group_by.expr,
@@ -230,11 +241,18 @@ impl AggregateExec {
 
         let schema = Arc::new(schema);
 
+        // 存储别名信息  key是原始列  value在新的schema下有不同的名字和下标
         let mut alias_map: HashMap<Column, Vec<Column>> = HashMap::new();
+
+        // 遍历参与分组的各个表达式
         for (expression, name) in group_by.expr.iter() {
+            // 可以理解为分组相关的表达式都是Column
             if let Some(column) = expression.as_any().downcast_ref::<Column>() {
+
+                // 找到col 在新的schema下的下标
                 let new_col_idx = schema.index_of(name)?;
                 // When the column name is the same, but index does not equal, treat it as Alias
+                // 代表给col赋予了别名 (name即新名 column.name为旧名)   或者下标发生了变化
                 if (column.name() != name) || (column.index() != new_col_idx) {
                     let entry = alias_map.entry(column.clone()).or_insert_with(Vec::new);
                     entry.push(Column::new(name, new_col_idx));
@@ -260,7 +278,7 @@ impl AggregateExec {
         &self.mode
     }
 
-    /// Grouping expressions
+    /// Grouping expressions   返回分组相关的表达式
     pub fn group_expr(&self) -> &PhysicalGroupBy {
         &self.group_by
     }
@@ -273,6 +291,7 @@ impl AggregateExec {
             .expr()
             .iter()
             .enumerate()
+            // 重新返回分组用的列  但是idx变小了
             .map(|(index, (_col, name))| {
                 Arc::new(expressions::Column::new(name, index)) as Arc<dyn PhysicalExpr>
             })
@@ -299,15 +318,22 @@ impl AggregateExec {
         self.input_schema.clone()
     }
 
+    // 调用execute时 会转发到该方法
     fn execute_typed(
         &self,
-        partition: usize,
+        partition: usize,   // 处理某个分区的数据
         context: Arc<TaskContext>,
     ) -> Result<StreamType> {
+        // 单次拉取的记录上限
         let batch_size = context.session_config().batch_size();
+        // 执行内部计划 获取结果集
         let input = self.input.execute(partition, Arc::clone(&context))?;
+        // TODO
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
+
+        // 根据是否有分组字段  产生2个不同的包装流
         if self.group_by.expr.is_empty() {
+            // 不需要分组 直接对结果聚合
             Ok(StreamType::AggregateStream(AggregateStream::new(
                 self.mode,
                 self.schema.clone(),
@@ -319,11 +345,12 @@ impl AggregateExec {
                 partition,
             )?))
         } else {
+            // 先对数据进行分组 之后再聚合
             Ok(StreamType::GroupedHashAggregateStream(
                 GroupedHashAggregateStream::new(
                     self.mode,
                     self.schema.clone(),
-                    self.group_by.clone(),
+                    self.group_by.clone(),  // 多传入一个分组表达式
                     self.aggr_expr.clone(),
                     self.filter_expr.clone(),
                     input,
@@ -343,6 +370,7 @@ impl ExecutionPlan for AggregateExec {
         self
     }
 
+    /// 返回的schema是对应聚合后的
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -350,17 +378,21 @@ impl ExecutionPlan for AggregateExec {
     /// Get the output partitioning of this plan
     fn output_partitioning(&self) -> Partitioning {
         match &self.mode {
+            // 为什么要区分这么多的聚合类型呢   就是为了在前面的阶段分区处理来提高性能
+            // 但是实际上并没有改写分区方式呀
             AggregateMode::Partial | AggregateMode::Single => {
                 // Partial and Single Aggregation will not change the output partitioning but need to respect the Alias
                 let input_partition = self.input.output_partitioning();
                 match input_partition {
+                    // 采用hash方式
                     Partitioning::Hash(exprs, part) => {
+                        // 这里要改写表达式(实际上就是改写column)
                         let normalized_exprs = exprs
                             .into_iter()
                             .map(|expr| {
                                 normalize_out_expr_with_alias_schema(
                                     expr,
-                                    &self.alias_map,
+                                    &self.alias_map,  // 原来的列需要在这里做一层转换
                                     &self.schema,
                                 )
                             })
@@ -370,7 +402,7 @@ impl ExecutionPlan for AggregateExec {
                     _ => input_partition,
                 }
             }
-            // Final Aggregation's output partitioning is the same as its real input
+            // Final Aggregation's output partitioning is the same as its real input  使用原来的分区方式
             _ => self.input.output_partitioning(),
         }
     }
@@ -405,7 +437,10 @@ impl ExecutionPlan for AggregateExec {
     }
 
     fn equivalence_properties(&self) -> EquivalenceProperties {
+        // 产生一个基于新schema的空对象
         let mut new_properties = EquivalenceProperties::new(self.schema());
+
+        // 主要就是做别名处理
         project_equivalence_properties(
             self.input.equivalence_properties(),
             &self.alias_map,
@@ -420,7 +455,7 @@ impl ExecutionPlan for AggregateExec {
 
     fn with_new_children(
         self: Arc<Self>,
-        children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,  // 用本对象包裹给定的child
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(AggregateExec::try_new(
             self.mode,
@@ -539,18 +574,22 @@ impl ExecutionPlan for AggregateExec {
     }
 }
 
+// 根据不同的情况  产生一个新的schema
 fn create_schema(
-    input_schema: &Schema,
-    group_expr: &[(Arc<dyn PhysicalExpr>, String)],
-    aggr_expr: &[Arc<dyn AggregateExpr>],
-    contains_null_expr: bool,
-    mode: AggregateMode,
+    input_schema: &Schema,  // 原schema
+    group_expr: &[(Arc<dyn PhysicalExpr>, String)],  // 分组相关的表达式
+    aggr_expr: &[Arc<dyn AggregateExpr>],   // 聚合数据使用的表达式
+    contains_null_expr: bool,   // 是否包含null值
+    mode: AggregateMode,  // 聚合采用的模式
 ) -> Result<Schema> {
+
     let mut fields = Vec::with_capacity(group_expr.len() + aggr_expr.len());
+
+    // 每个表达式 对应一个分组列
     for (expr, name) in group_expr {
         fields.push(Field::new(
             name,
-            expr.data_type(input_schema)?,
+            expr.data_type(input_schema)?,   // 该列必然来自于之前的schema 所以可以拿到类型
             // In cases where we have multiple grouping sets, we will use NULL expressions in
             // order to align the grouping sets. So the field must be nullable even if the underlying
             // schema field is not.
@@ -558,9 +597,11 @@ fn create_schema(
         ))
     }
 
+    // 根据不同模式 扩充不同的field
     match mode {
         AggregateMode::Partial => {
             // in partial mode, the fields of the accumulator's state
+            // 这种情况 存储的是中间状态的field
             for expr in aggr_expr {
                 fields.extend(expr.state_fields()?.iter().cloned())
             }
@@ -569,6 +610,7 @@ fn create_schema(
         | AggregateMode::FinalPartitioned
         | AggregateMode::Single => {
             // in final mode, the field with the final result of the accumulator
+            // 存储聚合函数产生的field
             for expr in aggr_expr {
                 fields.push(expr.field()?)
             }
@@ -587,32 +629,39 @@ fn group_schema(schema: &Schema, group_count: usize) -> SchemaRef {
 /// The expressions are different depending on `mode`:
 /// * Partial: AggregateExpr::expressions
 /// * Final: columns of `AggregateExpr::state_fields()`
+/// 不同的mode 以不同的方式使用这些聚合表达式
 fn aggregate_expressions(
-    aggr_expr: &[Arc<dyn AggregateExpr>],
+    aggr_expr: &[Arc<dyn AggregateExpr>],   // 一组聚合表达式
     mode: &AggregateMode,
-    col_idx_base: usize,
+    col_idx_base: usize,   // 应该是表示从第几列开始聚合
 ) -> Result<Vec<Vec<Arc<dyn PhysicalExpr>>>> {
     match mode {
         AggregateMode::Partial | AggregateMode::Single => Ok(aggr_expr
             .iter()
             .map(|agg| {
+                // 遍历每个聚合表达式   并根据不同的类型走不同的逻辑
+
+                // pre_cast_type 代表在执行表达式前 提前转换的目标数据类型
                 let pre_cast_type = if let Some(Sum {
                     data_type,
                     pre_cast_to_sum_type,
                     ..
                 }) = agg.as_any().downcast_ref::<Sum>()
                 {
+                    // 代表先转换成sum的目标类型
                     if *pre_cast_to_sum_type {
                         Some(data_type.clone())
                     } else {
                         None
                     }
+                // 该聚合表达式是计算平均数
                 } else if let Some(Avg {
                     sum_data_type,
                     pre_cast_to_sum_type,
                     ..
                 }) = agg.as_any().downcast_ref::<Avg>()
                 {
+                    // 也是代表要提前转换
                     if *pre_cast_to_sum_type {
                         Some(sum_data_type.clone())
                     } else {
@@ -621,6 +670,8 @@ fn aggregate_expressions(
                 } else {
                     None
                 };
+
+                // 给agg的子表达式 套上一层cast 使得数据在被聚合前先转换成跟结果一致的类型
                 agg.expressions()
                     .into_iter()
                     .map(|expr| {
@@ -634,9 +685,11 @@ fn aggregate_expressions(
         // in this mode, we build the merge expressions of the aggregation
         AggregateMode::Final | AggregateMode::FinalPartitioned => {
             let mut col_idx_base = col_idx_base;
+            // 这里将所有聚合表达式下的子字段展开
             Ok(aggr_expr
                 .iter()
                 .map(|agg| {
+                    // 将聚合表达式的 状态字段展开 变成column
                     let exprs = merge_expressions(col_idx_base, agg)?;
                     col_idx_base += exprs.len();
                     Ok(exprs)
@@ -650,12 +703,13 @@ fn aggregate_expressions(
 /// AggregateExpr' accumulator's state.
 ///
 /// `index_base` is the starting physical column index for the next expanded state field.
+/// 简单来看 就是铺开了聚合表达式内部的column
 fn merge_expressions(
     index_base: usize,
     expr: &Arc<dyn AggregateExpr>,
 ) -> Result<Vec<Arc<dyn PhysicalExpr>>> {
     Ok(expr
-        .state_fields()?
+        .state_fields()?    // state_field 是在聚合的中间过程需要记录的状态列
         .iter()
         .enumerate()
         .map(|(idx, f)| {
@@ -667,6 +721,7 @@ fn merge_expressions(
 pub(crate) type AccumulatorItem = Box<dyn Accumulator>;
 pub(crate) type RowAccumulatorItem = Box<dyn RowAccumulator>;
 
+// 产生表达式对应的累加器
 fn create_accumulators(
     aggr_expr: &[Arc<dyn AggregateExpr>],
 ) -> Result<Vec<AccumulatorItem>> {
@@ -676,6 +731,7 @@ fn create_accumulators(
         .collect::<Result<Vec<_>>>()
 }
 
+// 只有支持行格式的聚合表达式 会调用该方法
 fn create_row_accumulators(
     aggr_expr: &[Arc<dyn AggregateExpr>],
 ) -> Result<Vec<RowAccumulatorItem>> {
@@ -692,22 +748,26 @@ fn create_row_accumulators(
 
 /// returns a vector of ArrayRefs, where each entry corresponds to either the
 /// final value (mode = Final, FinalPartitioned and Single) or states (mode = Partial)
+/// 提取出累加器内的数据
 fn finalize_aggregation(
-    accumulators: &[AccumulatorItem],
-    mode: &AggregateMode,
+    accumulators: &[AccumulatorItem],  // 每种表达式对应一个聚合器
+    mode: &AggregateMode,   // 不同的聚合模式 累加器的使用方法不同
 ) -> Result<Vec<ArrayRef>> {
     match mode {
         AggregateMode::Partial => {
             // build the vector of states
             let a = accumulators
                 .iter()
+                // 返回累加器得到的各种状态
                 .map(|accumulator| accumulator.state())
                 .map(|value| {
                     value.map(|e| {
+                        // 将一个值转换成ArrayRef
                         e.iter().map(|v| v.to_array()).collect::<Vec<ArrayRef>>()
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            // 将每个累加器的各种状态平铺开
             Ok(a.iter().flatten().cloned().collect::<Vec<_>>())
         }
         AggregateMode::Final
@@ -715,7 +775,7 @@ fn finalize_aggregation(
         | AggregateMode::Single => {
             // merge the state to the final value
             accumulators
-                .iter()
+                .iter()  // evaluate只会产生一个值  就是最有意义的值  state可能是多个值 参照sum
                 .map(|accumulator| accumulator.evaluate().map(|v| v.to_array()))
                 .collect::<Result<Vec<ArrayRef>>>()
         }
@@ -757,10 +817,13 @@ fn evaluate_optional(
         .collect::<Result<Vec<_>>>()
 }
 
+// 将数据集 按照分组列进行分组
 fn evaluate_group_by(
     group_by: &PhysicalGroupBy,
     batch: &RecordBatch,
 ) -> Result<Vec<Vec<ArrayRef>>> {
+
+    // 取出分组相关列的值
     let exprs: Vec<ArrayRef> = group_by
         .expr
         .iter()
@@ -770,6 +833,7 @@ fn evaluate_group_by(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // 默认为空 反正也是取出某几列的值
     let null_exprs: Vec<ArrayRef> = group_by
         .null_expr
         .iter()
@@ -779,6 +843,7 @@ fn evaluate_group_by(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // 根据isnull提示  选择不同的列值
     Ok(group_by
         .groups
         .iter()

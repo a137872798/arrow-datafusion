@@ -59,25 +59,27 @@ pub(crate) mod variance;
 ///
 /// The aggregate expressions implement this trait also need to implement the [PartialEq<dyn Any>]
 /// This allows comparing the equality between the trait objects
+/// 聚合表达式
 pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
     /// Returns the aggregate expression as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
-    /// the field of the final result of this aggregation.
+    /// the field of the final result of this aggregation.  聚合结果对应的字段
     fn field(&self) -> Result<Field>;
 
     /// the accumulator used to accumulate values from the expressions.
     /// the accumulator expects the same number of arguments as `expressions` and must
-    /// return states with the same description as `state_fields`
+    /// return states with the same description as `state_fields`  累加器体现了聚合的逻辑
     fn create_accumulator(&self) -> Result<Box<dyn Accumulator>>;
 
     /// the fields that encapsulate the Accumulator's state
-    /// the number of fields here equals the number of states that the accumulator contains
+    /// the number of fields here equals the number of states that the accumulator contains  返回累加过程中的状态字段
     fn state_fields(&self) -> Result<Vec<Field>>;
 
     /// expressions that are passed to the Accumulator.
     /// Single-column aggregations such as `sum` return a single value, others (e.g. `cov`) return many.
+    /// 累加表达式相关的物理表达式 在Sum中感觉是无用字段    PhysicalExpr可以对数据集求值
     fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>>;
 
     /// Human readable name such as `"MIN(c2)"`. The default
@@ -86,13 +88,13 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
         "AggregateExpr: default name"
     }
 
-    /// If the aggregate expression is supported by row format
+    /// If the aggregate expression is supported by row format  支持行存储 因为有些存储层是列存储
     fn row_accumulator_supported(&self) -> bool {
         false
     }
 
     /// Specifies whether this aggregate function can run using bounded memory.
-    /// Any accumulator returning "true" needs to implement `retract_batch`.
+    /// Any accumulator returning "true" needs to implement `retract_batch`.  是否可以在有限的内存上运行  如果是true 要实现retract_batch
     fn supports_bounded_execution(&self) -> bool {
         false
     }
@@ -114,7 +116,7 @@ pub trait AggregateExpr: Send + Sync + Debug + PartialEq<dyn Any> {
     /// Construct an expression that calculates the aggregate in reverse.
     /// Typically the "reverse" expression is itself (e.g. SUM, COUNT).
     /// For aggregates that do not support calculation in reverse,
-    /// returns None (which is the default value).
+    /// returns None (which is the default value).  创建一个反向的聚合表达式  sum这种 反向还是自己
     fn reverse_expr(&self) -> Option<Arc<dyn AggregateExpr>> {
         None
     }

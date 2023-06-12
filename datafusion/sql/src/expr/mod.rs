@@ -38,6 +38,7 @@ use sqlparser::ast::{ArrayAgg, Expr as SQLExpr, TrimWhereField, Value};
 use sqlparser::parser::ParserError::ParserError;
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
     pub(crate) fn sql_expr_to_logical_expr(
         &self,
         sql: SQLExpr,
@@ -58,11 +59,14 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         // would be to avoid recursion all together and use an
         // iterative algorithm.
         match sql {
+            // 处理二元操作
             SQLExpr::BinaryOp { left, op, right } => {
+                // 内部会回到sql_expr_to_logical_expr分别处理左右2个expr 再拼接成一个 BinaryOp Expr
                 self.parse_sql_binary_op(*left, op, *right, schema, planner_context)
             }
             // since this function requires more space per frame
             // avoid calling it for binary ops
+            // 其余类型通过该方法解析
             _ => self.sql_expr_to_logical_expr_internal(sql, schema, planner_context),
         }
     }
@@ -70,13 +74,17 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     /// Generate a relational expression from a SQL expression
     pub fn sql_to_expr(
         &self,
-        sql: SQLExpr,
+        sql: SQLExpr,  // 处理 sql-parser的expr
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+        // 将sql expr解析成expr
         let mut expr = self.sql_expr_to_logical_expr(sql, schema, planner_context)?;
+        // 对别名进行改写
         expr = self.rewrite_partial_qualifier(expr, schema);
+        // 确保这些col都能在schema中找到
         self.validate_schema_satisfies_exprs(schema, &[expr.clone()])?;
+        // 如果展位符还未填充数据类型  在这里进行推断
         let expr = infer_placeholder_types(expr, schema)?;
         Ok(expr)
     }
@@ -111,6 +119,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
     /// Internal implementation. Use
     /// [`Self::sql_expr_to_logical_expr`] to plan exprs.
+    /// 将sqlExpr解析成表达式
     fn sql_expr_to_logical_expr_internal(
         &self,
         sql: SQLExpr,
@@ -118,9 +127,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
         match sql {
+            // 将sqlExpr转换成 value expr  其中数值变成Literal   占位符类型变成 Expr::Placeholder
             SQLExpr::Value(value) => {
                 self.parse_value(value, planner_context.prepare_param_data_types())
             }
+
+            // 对应一个获取时间的函数
             SQLExpr::Extract { field, expr } => Ok(Expr::ScalarFunction {
                 fun: BuiltinScalarFunction::DatePart,
                 args: vec![
@@ -129,7 +141,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 ],
             }),
 
+            // 转换成数组类型
             SQLExpr::Array(arr) => self.sql_array_literal(arr.elem, schema),
+
+            // TODO
             SQLExpr::Interval {
                 value,
                 leading_field,
@@ -143,6 +158,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 last_field,
                 fractional_seconds_precision,
             ),
+
+            // 主要是转换成column
             SQLExpr::Identifier(id) => self.sql_identifier_to_expr(id, schema, planner_context),
 
             SQLExpr::MapAccess { column, keys } => {
@@ -156,10 +173,13 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             }
 
             SQLExpr::ArrayIndex { obj, indexes } => {
+                // 里头的应该是Array类型吧
                 let expr = self.sql_expr_to_logical_expr(*obj, schema, planner_context)?;
+                // 追加通过index检索元素的能力
                 plan_indexed(expr, indexes)
             }
 
+            // TODO
             SQLExpr::CompoundIdentifier(ids) => self.sql_compound_identifier_to_expr(ids, schema, planner_context),
 
             SQLExpr::Case {
@@ -174,6 +194,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 data_type,
             } => Ok(Expr::Cast(Cast::new(
                 Box::new(self.sql_expr_to_logical_expr(*expr, schema, planner_context)?),
+                // data_type是sql-parser类型 要转换成arrow类型
                 self.convert_data_type(&data_type)?,
             ))),
 
@@ -185,6 +206,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 self.convert_data_type(&data_type)?,
             ))),
 
+            // 将string转换成指定类型
             SQLExpr::TypedString {
                 data_type,
                 value,
@@ -193,6 +215,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 self.convert_data_type(&data_type)?,
             ))),
 
+            // 给结果包装一层
             SQLExpr::IsNull(expr) => Ok(Expr::IsNull(Box::new(
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
@@ -201,12 +224,14 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 self.sql_expr_to_logical_expr(*expr, schema, planner_context)?,
             ))),
 
+            // TODO
             SQLExpr::IsDistinctFrom(left, right) => Ok(Expr::BinaryExpr(BinaryExpr::new(
                 Box::new(self.sql_expr_to_logical_expr(*left, schema, planner_context)?),
                 Operator::IsDistinctFrom,
                 Box::new(self.sql_expr_to_logical_expr(*right, schema, planner_context)?),
             ))),
 
+            // TODO
             SQLExpr::IsNotDistinctFrom(left, right) => Ok(Expr::BinaryExpr(BinaryExpr::new(
                 Box::new(self.sql_expr_to_logical_expr(*left, schema, planner_context)?),
                 Operator::IsNotDistinctFrom,
@@ -225,8 +250,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
             SQLExpr::IsNotUnknown(expr) => Ok(Expr::IsNotUnknown(Box::new(self.sql_expr_to_logical_expr(*expr, schema, planner_context)?))),
 
+            // 代表对表达式发起某种一元操作
             SQLExpr::UnaryOp { op, expr } => self.parse_sql_unary_op(op, *expr, schema, planner_context),
 
+            // <expr> [ NOT ] BETWEEN <low> AND <high>
             SQLExpr::Between {
                 expr,
                 negated,
@@ -239,16 +266,16 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 Box::new(self.sql_expr_to_logical_expr(*high, schema, planner_context)?),
             ))),
 
+            // 条件要求列值要落在list中
             SQLExpr::InList {
                 expr,
                 list,
                 negated,
             } => self.sql_in_list_to_expr(*expr, list, negated, schema, planner_context),
 
+            // 这3个类似 就是将SqlExpr 转换成 expr
             SQLExpr::Like { negated, expr, pattern, escape_char } => self.sql_like_to_expr(negated, *expr, *pattern, escape_char, schema, planner_context),
-
             SQLExpr::ILike { negated, expr, pattern, escape_char } =>  self.sql_ilike_to_expr(negated, *expr, *pattern, escape_char, schema, planner_context),
-
             SQLExpr::SimilarTo { negated, expr, pattern, escape_char } => self.sql_similarto_to_expr(negated, *expr, *pattern, escape_char, schema, planner_context),
 
             SQLExpr::BinaryOp {
@@ -259,6 +286,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 ))
             }
 
+            // TODO
             #[cfg(feature = "unicode_expressions")]
             SQLExpr::Substring {
                 expr,
@@ -277,6 +305,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
 
             SQLExpr::Trim { expr, trim_where, trim_what } => self.sql_trim_to_expr(*expr, trim_where, trim_what, schema, planner_context),
 
+            // 下面这些基本也都是函数
             SQLExpr::AggregateExpressionWithFilter { expr, filter } => self.sql_agg_with_filter_to_expr(*expr, *filter, schema, planner_context),
 
             SQLExpr::Function(function) => self.sql_function_to_expr(function, schema, planner_context),
@@ -345,6 +374,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         )))
     }
 
+    // 代表要求某个表达式的值范围要在list之内
     fn sql_in_list_to_expr(
         &self,
         expr: SQLExpr,
@@ -358,6 +388,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
             .collect::<Result<Vec<_>>>()?;
 
+        // 实际上就是各自转换并拼接起来
         Ok(Expr::InList {
             expr: Box::new(self.sql_expr_to_logical_expr(
                 expr,
@@ -441,6 +472,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         )))
     }
 
+    // 对应trim函数
     fn sql_trim_to_expr(
         &self,
         expr: SQLExpr,
@@ -464,6 +496,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             }
             None => vec![arg],
         };
+        // 包装成函数
         Ok(Expr::ScalarFunction { fun, args })
     }
 
@@ -549,6 +582,7 @@ fn plan_key(key: SQLExpr) -> Result<ScalarValue> {
     Ok(scalar)
 }
 
+// keys 对应的是数组的下标   keys是嵌套的
 fn plan_indexed(expr: Expr, mut keys: Vec<SQLExpr>) -> Result<Expr> {
     let key = keys.pop().ok_or_else(|| {
         ParserError("Internal error: Missing index key expression".to_string())

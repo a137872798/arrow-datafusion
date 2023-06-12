@@ -29,11 +29,12 @@ use std::sync::Arc;
 /// While a [`ColumnarValue`] can always be converted into an array
 /// for convenience, it is often much more performant to provide an
 /// optimized path for scalar values.
+/// 代表某一列结果
 #[derive(Clone, Debug)]
 pub enum ColumnarValue {
-    /// Array of values
+    /// Array of values   该列结果包含多条数据
     Array(ArrayRef),
-    /// A single value
+    /// A single value    该列结果包含单个值
     Scalar(ScalarValue),
 }
 

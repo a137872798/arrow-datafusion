@@ -118,6 +118,7 @@ impl<S: SimplifyInfo> ExprSimplifier<S> {
         // (evaluating constants can enable new simplifications and
         // simplifications can enable new constant evaluation)
         // https://github.com/apache/arrow-datafusion/issues/1160
+        // 通过这些改写器尝试对表达式进行重写
         expr.rewrite(&mut const_evaluator)?
             .rewrite(&mut simplifier)?
             // run both passes twice to try an minimize simplifications that we missed
@@ -147,6 +148,7 @@ impl<S: SimplifyInfo> ExprSimplifier<S> {
 ///
 /// Note it does not handle algebraic rewrites such as `(a or false)`
 /// --> `a`, which is handled by [`Simplifier`]
+/// 常量表达式
 struct ConstEvaluator<'a> {
     /// `can_evaluate` is used during the depth-first-search of the
     /// `Expr` tree to track if any siblings (or their descendants) were
@@ -164,6 +166,7 @@ struct ConstEvaluator<'a> {
 
     execution_props: &'a ExecutionProps,
     input_schema: DFSchema,
+    // 输入的数据
     input_batch: RecordBatch,
 }
 
@@ -180,6 +183,7 @@ impl<'a> TreeNodeRewriter for ConstEvaluator<'a> {
 
         if !Self::can_evaluate(expr) {
             // walk back up stack, marking first parent that is not mutable
+            // 将最近连续的true修改成false
             let parent_iter = self.can_evaluate.iter_mut().rev();
             for p in parent_iter {
                 if !*p {
@@ -197,8 +201,11 @@ impl<'a> TreeNodeRewriter for ConstEvaluator<'a> {
         Ok(RewriteRecursion::Continue)
     }
 
+    // 重写表达式 是自下而上修改的
     fn mutate(&mut self, expr: Expr) -> Result<Expr> {
+        // 弹出最后一个元素
         match self.can_evaluate.pop() {
+            // 执行表达式产生常量值 用来替换expr
             Some(true) => Ok(Expr::Literal(self.evaluate_to_scalar(expr)?)),
             Some(false) => Ok(expr),
             _ => Err(DataFusionError::Internal(
@@ -212,14 +219,18 @@ impl<'a> ConstEvaluator<'a> {
     /// Create a new `ConstantEvaluator`. Session constants (such as
     /// the time for `now()` are taken from the passed
     /// `execution_props`.
+    /// 创建一个常量评估对象
     pub fn try_new(execution_props: &'a ExecutionProps) -> Result<Self> {
         // The dummy column name is unused and doesn't matter as only
         // expressions without column references can be evaluated
         static DUMMY_COL_NAME: &str = ".";
+
+        // 创建一个空的schema
         let schema = Schema::new(vec![Field::new(DUMMY_COL_NAME, DataType::Null, true)]);
         let input_schema = DFSchema::try_from(schema.clone())?;
         // Need a single "input" row to produce a single output row
         let col = new_null_array(&DataType::Null, 1);
+        // 初始化时 产生一个空对象
         let input_batch = RecordBatch::try_new(std::sync::Arc::new(schema), vec![col])?;
 
         Ok(Self {
@@ -230,7 +241,7 @@ impl<'a> ConstEvaluator<'a> {
         })
     }
 
-    /// Can a function of the specified volatility be evaluated?
+    /// Can a function of the specified volatility be evaluated?   能否被该对象改写
     fn volatility_ok(volatility: Volatility) -> bool {
         match volatility {
             Volatility::Immutable => true,
@@ -242,6 +253,7 @@ impl<'a> ConstEvaluator<'a> {
 
     /// Can the expression be evaluated at plan time, (assuming all of
     /// its children can also be evaluated)?
+    /// 判断ConstEvaluator 能否作用在该表达式上
     fn can_evaluate(expr: &Expr) -> bool {
         // check for reasons we can't evaluate this node
         //
@@ -292,17 +304,20 @@ impl<'a> ConstEvaluator<'a> {
     }
 
     /// Internal helper to evaluates an Expr
+    /// 将表达式转换成一个常量值
     pub(crate) fn evaluate_to_scalar(&mut self, expr: Expr) -> Result<ScalarValue> {
         if let Expr::Literal(s) = expr {
             return Ok(s);
         }
 
+        // 创建物理计划
         let phys_expr = create_physical_expr(
             &expr,
             &self.input_schema,
             &self.input_batch.schema(),
             self.execution_props,
         )?;
+        // 将输入值通过物理表达式处理后 产生结果
         let col_val = phys_expr.evaluate(&self.input_batch)?;
         match col_val {
             ColumnarValue::Array(a) => {
@@ -344,6 +359,7 @@ impl<'a, S: SimplifyInfo> TreeNodeRewriter for Simplifier<'a, S> {
 
     /// rewrite the expression simplifying any constant expressions
     fn mutate(&mut self, expr: Expr) -> Result<Expr> {
+        // 支持的所有操作
         use datafusion_expr::Operator::{
             And, BitwiseAnd, BitwiseOr, BitwiseShiftLeft, BitwiseShiftRight, BitwiseXor,
             Divide, Eq, Modulo, Multiply, NotEq, Or, RegexIMatch, RegexMatch,

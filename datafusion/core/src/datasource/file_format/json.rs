@@ -85,15 +85,18 @@ impl FileFormat for JsonFormat {
         self
     }
 
+    // 先只看json相关的
     async fn infer_schema(
         &self,
         _state: &SessionState,
         store: &Arc<dyn ObjectStore>,
-        objects: &[ObjectMeta],
+        objects: &[ObjectMeta], // 文件元数据
     ) -> Result<SchemaRef> {
         let mut schemas = Vec::new();
         let mut records_to_read = self.schema_infer_max_rec.unwrap_or(usize::MAX);
         let file_compression_type = self.file_compression_type.to_owned();
+
+        // 遍历每个文件元数据
         for object in objects {
             let mut take_while = || {
                 let should_take = records_to_read > 0;
@@ -105,6 +108,7 @@ impl FileFormat for JsonFormat {
 
             let schema = match store.get(&object.location).await? {
                 GetResult::File(file, _) => {
+                    // 套一层解码
                     let decoder = file_compression_type.convert_read(file)?;
                     let mut reader = BufReader::new(decoder);
                     let iter = ValueIter::new(&mut reader, None);
@@ -125,6 +129,7 @@ impl FileFormat for JsonFormat {
             }
         }
 
+        // 读取多个文件后 每个文件对应一个schema 这里进行合并
         let schema = Schema::try_merge(schemas)?;
         Ok(Arc::new(schema))
     }

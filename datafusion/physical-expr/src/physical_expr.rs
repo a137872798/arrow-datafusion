@@ -36,15 +36,19 @@ use std::sync::Arc;
 
 /// Expression that can be evaluated against a RecordBatch
 /// A Physical expression knows its type, nullability and how to evaluate itself.
+/// 可以作用在结果集上 得到列值
 pub trait PhysicalExpr: Send + Sync + Display + Debug + PartialEq<dyn Any> {
     /// Returns the physical expression as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
     /// Get the data type of this expression, given the schema of the input
+    /// 该表达式对应的结果
     fn data_type(&self, input_schema: &Schema) -> Result<DataType>;
     /// Determine whether this expression is nullable, given the schema of the input
+    /// 结果是否能为空
     fn nullable(&self, input_schema: &Schema) -> Result<bool>;
     /// Evaluate an expression against a RecordBatch
+    /// 作用表达式 得到结果
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue>;
     /// Evaluate an expression against a RecordBatch after first applying a
     /// validity array
@@ -53,6 +57,7 @@ pub trait PhysicalExpr: Send + Sync + Display + Debug + PartialEq<dyn Any> {
         batch: &RecordBatch,
         selection: &BooleanArray,
     ) -> Result<ColumnarValue> {
+        // 通过selection对结果集进行过滤
         let tmp_batch = filter_record_batch(batch, selection)?;
 
         let tmp_result = self.evaluate(&tmp_batch)?;
@@ -60,6 +65,7 @@ pub trait PhysicalExpr: Send + Sync + Display + Debug + PartialEq<dyn Any> {
         if batch.num_rows() == tmp_batch.num_rows() {
             return Ok(tmp_result);
         }
+
         if let ColumnarValue::Array(a) = tmp_result {
             let result = scatter(selection, a.as_ref())?;
             Ok(ColumnarValue::Array(result))
@@ -69,6 +75,7 @@ pub trait PhysicalExpr: Send + Sync + Display + Debug + PartialEq<dyn Any> {
     }
 
     /// Get a list of child PhysicalExpr that provide the input for this expr.
+    /// 物理表达式也支持嵌套结构
     fn children(&self) -> Vec<Arc<dyn PhysicalExpr>>;
 
     /// Returns a new PhysicalExpr where all children were replaced by new exprs.
@@ -79,11 +86,13 @@ pub trait PhysicalExpr: Send + Sync + Display + Debug + PartialEq<dyn Any> {
 
     /// Return the boundaries of this expression. This method (and all the
     /// related APIs) are experimental and subject to change.
+    /// 应该是分析当前表达式的结果集  并将数据补充到context中
     fn analyze(&self, context: AnalysisContext) -> AnalysisContext {
         context
     }
 
     /// Computes bounds for the expression using interval arithmetic.
+    /// 预估结果范围
     fn evaluate_bounds(&self, _children: &[&Interval]) -> Result<Interval> {
         Err(DataFusionError::NotImplemented(format!(
             "Not implemented for {self}"
@@ -115,7 +124,7 @@ pub struct AnalysisContext {
     /// A list of known column boundaries, ordered by the index
     /// of the column in the current schema.
     pub column_boundaries: Vec<Option<ExprBoundaries>>,
-    // Result of the current analysis.
+    /// Result of the current analysis.   存储分析后的结果
     pub boundaries: Option<ExprBoundaries>,
 }
 
@@ -132,6 +141,7 @@ impl AnalysisContext {
     }
 
     /// Create a new analysis context from column statistics.
+    /// 通过一个统计对象进行信息填充
     pub fn from_statistics(input_schema: &Schema, statistics: &Statistics) -> Self {
         // Even if the underlying statistics object doesn't have any column level statistics,
         // we can still create an analysis context with the same number of columns and see whether
@@ -157,6 +167,7 @@ impl AnalysisContext {
     }
 
     /// Update the boundaries of a column.
+    /// 更新col的boundaries信息
     pub fn with_column_update(
         mut self,
         column: usize,
@@ -177,9 +188,10 @@ pub struct ExprBoundaries {
     pub max_value: ScalarValue,
     /// Maximum number of distinct values this expression can produce, if known.
     pub distinct_count: Option<usize>,
-    /// The estimated percantage of rows that this expression would select, if
+    /// The estimated percentage of rows that this expression would select, if
     /// it were to be used as a boolean predicate on a filter. The value will be
     /// between 0.0 (selects nothing) and 1.0 (selects everything).
+    /// 描述该表达式会命中row的百分比
     pub selectivity: Option<f64>,
 }
 
@@ -237,6 +249,7 @@ impl ExprBoundaries {
 /// The size of `children` must be equal to the size of `PhysicalExpr::children()`.
 /// Allow the vtable address comparisons for PhysicalExpr Trait Objects，it is harmless even
 /// in the case of 'false-native'.
+/// 替换子物理表达式
 #[allow(clippy::vtable_address_comparisons)]
 pub fn with_new_children_if_necessary(
     expr: Arc<dyn PhysicalExpr>,
@@ -251,6 +264,7 @@ pub fn with_new_children_if_necessary(
         || children
             .iter()
             .zip(old_children.iter())
+        // 至少要一个child的表达式不同
             .any(|(c1, c2)| !Arc::ptr_eq(c1, c2))
     {
         expr.with_new_children(children)
@@ -284,6 +298,7 @@ fn scatter(mask: &BooleanArray, truthy: &dyn Array) -> Result<ArrayRef> {
 
     // update the mask so that any null values become false
     // (SlicesIterator doesn't respect nulls)
+    // 将null 变成false
     let mask = and_kleene(mask, &is_not_null(mask)?)?;
 
     let mut mutable = MutableArrayData::new(vec![&truthy], true, mask.len());

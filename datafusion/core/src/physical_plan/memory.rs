@@ -175,9 +175,9 @@ pub struct MemoryStream {
 impl MemoryStream {
     /// Create an iterator for a vector of record batches
     pub fn try_new(
-        data: Vec<RecordBatch>,
-        schema: SchemaRef,
-        projection: Option<Vec<usize>>,
+        data: Vec<RecordBatch>,  // 每个RecordBatch 对应一个结果集(支持多行多列)
+        schema: SchemaRef,   // 描述数据集的结构 (包含哪些列)
+        projection: Option<Vec<usize>>,  // 代表要保留的字段  None代表都要保留
     ) -> Result<Self> {
         Ok(Self {
             data,
@@ -191,11 +191,15 @@ impl MemoryStream {
 impl Stream for MemoryStream {
     type Item = Result<RecordBatch>;
 
+    // 流本身是在异步环境中使用的
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         _: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+
+        // 每次返回一个数据集
         Poll::Ready(if self.index < self.data.len() {
+
             self.index += 1;
             let batch = &self.data[self.index - 1];
 

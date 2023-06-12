@@ -140,6 +140,7 @@ impl<'a> DFParser<'a> {
 
     /// Parse a SQL string and produce one or more [`Statement`]s with
     /// with the specified dialect.
+    /// 解析sql
     pub fn parse_sql_with_dialect(
         sql: &str,
         dialect: &dyn Dialect,

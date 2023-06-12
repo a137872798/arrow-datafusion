@@ -69,10 +69,10 @@ impl AnalyzerRule for TypeCoercion {
 
 fn analyze_internal(
     // use the external schema to handle the correlated subqueries case
-    external_schema: &DFSchema,
+    external_schema: &DFSchema,  // 默认为空
     plan: &LogicalPlan,
 ) -> Result<LogicalPlan> {
-    // optimize child plans first
+    // optimize child plans first  从子节点开始
     let new_inputs = plan
         .inputs()
         .iter()
@@ -83,6 +83,7 @@ fn analyze_internal(
     let mut schema = merge_schema(new_inputs.iter().collect());
 
     if let LogicalPlan::TableScan(ts) = plan {
+        // 如果是查表操作 将schema抽取出来合并
         let source_schema =
             DFSchema::try_from_qualified_schema(&ts.table_name, &ts.source.schema())?;
         schema.merge(&source_schema);
@@ -91,6 +92,7 @@ fn analyze_internal(
     // merge the outer schema for correlated subqueries
     // like case:
     // select t2.c2 from t1 where t1.c1 in (select t2.c1 from t2 where t2.c2=t1.c3)
+    // 还要和外部schema合并
     schema.merge(external_schema);
 
     let mut expr_rewrite = TypeCoercionRewriter {
@@ -103,6 +105,7 @@ fn analyze_internal(
         .map(|expr| {
             // ensure aggregate names don't change:
             // https://github.com/apache/arrow-datafusion/issues/3555
+            // 对plan的表达式进行处理
             rewrite_preserving_name(expr, &mut expr_rewrite)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -114,9 +117,11 @@ pub(crate) struct TypeCoercionRewriter {
     pub(crate) schema: DFSchemaRef,
 }
 
+// 对节点进行改写
 impl TreeNodeRewriter for TypeCoercionRewriter {
     type N = Expr;
 
+    // 先处理子节点
     fn pre_visit(&mut self, _expr: &Expr) -> Result<RewriteRecursion> {
         Ok(RewriteRecursion::Continue)
     }

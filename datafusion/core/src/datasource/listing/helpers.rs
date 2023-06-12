@@ -54,15 +54,18 @@ const FILE_MODIFIED_COLUMN_NAME: &str = "_df_part_file_modified_";
 /// - the table provider can filter the table partition values with this expression
 /// - the expression can be marked as `TableProviderFilterPushDown::Exact` once this filtering
 /// was performed
+/// 判断该表达式能否作用在这些分区键上
 pub fn expr_applicable_for_cols(col_names: &[String], expr: &Expr) -> bool {
     let mut is_applicable = true;
     expr.apply(&mut |expr| {
         Ok(match expr {
             Expr::Column(Column { ref name, .. }) => {
+                // 涉及到多个col的情况 必须都满足
                 is_applicable &= col_names.contains(name);
                 if is_applicable {
                     VisitRecursion::Skip
                 } else {
+                    // 一旦遇到不满足的 即可退出处理
                     VisitRecursion::Stop
                 }
             }
@@ -137,6 +140,7 @@ pub fn expr_applicable_for_cols(col_names: &[String], expr: &Expr) -> bool {
 }
 
 /// Partition the list of files into `n` groups
+/// 对文件进行分组
 pub fn split_files(
     partitioned_files: Vec<PartitionedFile>,
     n: usize,
@@ -160,13 +164,16 @@ pub fn split_files(
 /// TODO for tables with many files (10k+), it will usually more efficient
 /// to first list the folders relative to the first partition dimension,
 /// prune those, then list only the contain of the remaining folders.
+/// 检索某个路径下满足过滤条件的所有数据文件 注意PartitionedFile还会体现该数据文件的分区信息(分区键值是多少)
 pub async fn pruned_partition_list<'a>(
     store: &'a dyn ObjectStore,
-    table_path: &'a ListingTableUrl,
+    table_path: &'a ListingTableUrl,  // 数据文件所在的路径
     filters: &'a [Expr],
-    file_extension: &'a str,
-    table_partition_cols: &'a [(String, DataType)],
+    file_extension: &'a str,   // 描述文件类型 可能需要先解压
+    table_partition_cols: &'a [(String, DataType)],  // 影响分区的列
 ) -> Result<BoxStream<'a, Result<PartitionedFile>>> {
+
+    // 找到匹配的所有数据文件
     let list = table_path.list_all_files(store, file_extension);
 
     // if no partition col => simply list all the files
@@ -174,6 +181,7 @@ pub async fn pruned_partition_list<'a>(
         return Ok(Box::pin(list.map_ok(|object_meta| object_meta.into())));
     }
 
+    // 过滤器要满足前提条件才能生效 跟分区键有关
     let applicable_filters: Vec<_> = filters
         .iter()
         .filter(|f| {
@@ -187,6 +195,7 @@ pub async fn pruned_partition_list<'a>(
         })
         .collect();
 
+    // 无可生效的过滤器
     if applicable_filters.is_empty() {
         // Parse the partition values while listing all the files
         // Note: We might avoid parsing the partition values if they are not used in any projection,
@@ -194,6 +203,8 @@ pub async fn pruned_partition_list<'a>(
         // the object store.
         Ok(Box::pin(list.try_filter_map(
             move |object_meta| async move {
+
+                // 得到了一组标量值 每个值代表路径的一部分 意味着当分区键a,b,c的值为x,x,x的时候 会对应该数据文件
                 let parsed_path = parse_partitions_for_path(
                     table_path,
                     &object_meta.location,
@@ -205,8 +216,10 @@ pub async fn pruned_partition_list<'a>(
                 .map(|p| {
                     p.iter()
                         .zip(table_partition_cols)
+                        // 分区值 和分区键
                         .map(|(&part_value, part_column)| {
                             ScalarValue::try_from_string(
+                                // 分区值和分区键类型
                                 part_value.to_string(),
                                 &part_column.1,
                             )
@@ -230,8 +243,12 @@ pub async fn pruned_partition_list<'a>(
         )))
     } else {
         // parse the partition values and serde them as a RecordBatch to filter them
+        // 部分过滤器会生效
         let metas: Vec<_> = list.try_collect().await?;
+
+        // 将数据文件信息抽取出来 生成基于列表达的 RecordBatch
         let batch = paths_to_batch(table_partition_cols, table_path, &metas)?;
+        // 在内存中构建一个模拟表
         let mem_table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
         debug!("get mem_table: {:?}", mem_table);
 
@@ -239,10 +256,13 @@ pub async fn pruned_partition_list<'a>(
         // TODO having the external context would allow us to resolve `Volatility::Stable`
         // scalar functions (`ScalarFunction` & `ScalarUDF`) and `ScalarVariable`s
         let ctx = SessionContext::new();
+        // 通过这种方式来使得过滤器生效
         let mut df = ctx.read_table(Arc::new(mem_table))?;
         for filter in applicable_filters {
             df = df.filter(filter.clone())?;
         }
+
+        // 得到过滤结果
         let filtered_batches = df.collect().await?;
         let paths = batches_to_paths(&filtered_batches)?;
 
@@ -258,18 +278,26 @@ pub async fn pruned_partition_list<'a>(
 ///
 /// Note: For the last modified date, this looses precisions higher than millisecond.
 fn paths_to_batch(
-    table_partition_cols: &[(String, DataType)],
-    table_path: &ListingTableUrl,
-    metas: &[ObjectMeta],
+    table_partition_cols: &[(String, DataType)],  // 所有分区键
+    table_path: &ListingTableUrl,  // 外层路径
+    metas: &[ObjectMeta],  // 相关数据文件
 ) -> Result<RecordBatch> {
+
+    // 用于存储数据文件的元数据
     let mut key_builder = StringBuilder::with_capacity(metas.len(), 1024);
     let mut length_builder = UInt64Builder::with_capacity(metas.len());
     let mut modified_builder = Date64Builder::with_capacity(metas.len());
+
+    // 每个分区列对应一组值
     let mut partition_scalar_values = table_partition_cols
         .iter()
         .map(|_| Vec::new())
         .collect::<Vec<_>>();
+
+    // 开始遍历元数据了
     for file_meta in metas {
+
+        // 将每个数据文件的分区键的值读取出来 存储在一个vec中
         if let Some(partition_values) = parse_partitions_for_path(
             table_path,
             &file_meta.location,
@@ -286,6 +314,7 @@ fn paths_to_batch(
                     part_val.to_string(),
                     &table_partition_cols[i].1,
                 )?;
+                // 找到列 插入列关联的vec
                 partition_scalar_values[i].push(scalar_val);
             }
         } else {
@@ -293,13 +322,15 @@ fn paths_to_batch(
         }
     }
 
-    // finish all builders
+    // finish all builders   对应3个特殊列 存储的是每个列在各个数据对象的值
     let mut col_arrays: Vec<ArrayRef> = vec![
         ArrayBuilder::finish(&mut key_builder),
         ArrayBuilder::finish(&mut length_builder),
         ArrayBuilder::finish(&mut modified_builder),
     ];
+
     for (i, part_scalar_val) in partition_scalar_values.into_iter().enumerate() {
+        // 代表该分区键 值都为空
         if part_scalar_val.is_empty() {
             col_arrays.push(new_empty_array(&table_partition_cols[i].1));
         } else {
@@ -308,7 +339,7 @@ fn paths_to_batch(
         }
     }
 
-    // put the schema together
+    // put the schema together   生成描述字段的对象
     let mut fields = vec![
         Field::new(FILE_PATH_COLUMN_NAME, DataType::Utf8, false),
         Field::new(FILE_SIZE_COLUMN_NAME, DataType::UInt64, false),
@@ -323,6 +354,7 @@ fn paths_to_batch(
 }
 
 /// convert a set of record batches created by `paths_to_batch()` back to partitioned files.
+/// 将过滤结果 还原会被分区的数据文件
 fn batches_to_paths(batches: &[RecordBatch]) -> Result<Vec<PartitionedFile>> {
     batches
         .iter()
@@ -331,6 +363,7 @@ fn batches_to_paths(batches: &[RecordBatch]) -> Result<Vec<PartitionedFile>> {
             let length_array = as_uint64_array(batch.column(1)).unwrap();
             let modified_array = as_date64_array(batch.column(2)).unwrap();
 
+            // 行数代表数据文件数量
             (0..batch.num_rows()).map(move |row| {
                 Ok(PartitionedFile {
                     object_meta: ObjectMeta {
@@ -371,11 +404,18 @@ fn parse_partitions_for_path<'a>(
     file_path: &'a Path,
     table_partition_cols: &[String],
 ) -> Option<Vec<&'a str>> {
+    ///         assert_eq!(url.prefix.as_ref(), "foo/bar");
+    ///         let path = Path::from("foo/bar/partition/foo.parquet");
+    ///         let prefix: Vec<_> = url.strip_prefix(&path).unwrap().collect();
+    ///        assert_eq!(prefix, vec!["partition", "foo.parquet"]);
+    ///     分解后得到一个迭代器 每次迭代得到路径的一部分
     let subpath = table_path.strip_prefix(file_path)?;
 
     let mut part_values = vec![];
     for (part, pn) in subpath.zip(table_partition_cols) {
+        // 这里应该是认为每个子路径都用 (分区col=xxx) 来表示
         match part.split_once('=') {
+            // 分区键相同的情况下 把value填进去
             Some((name, val)) if name == pn => part_values.push(val),
             _ => return None,
         }

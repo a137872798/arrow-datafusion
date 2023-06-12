@@ -32,18 +32,24 @@ use std::{fmt, str::FromStr};
 /// WindowFunction
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WindowFunction {
-    /// window function that leverages an aggregate function
+    /// window function that leverages an aggregate function  将聚合函数作为一个窗口函数
     AggregateFunction(AggregateFunction),
-    /// window function that leverages a built-in window function
+    /// window function that leverages a built-in window function   一个内置窗口函数
     BuiltInWindowFunction(BuiltInWindowFunction),
+    /// 用户定义的聚合函数
     AggregateUDF(Arc<AggregateUDF>),
 }
 
 /// Find DataFusion's built-in window function by name.
 pub fn find_df_window_func(name: &str) -> Option<WindowFunction> {
     let name = name.to_lowercase();
+
+    // 内建窗口函数 和聚合函数都是内置的
+
+    // 通过名字找到聚合函数
     if let Ok(aggregate) = AggregateFunction::from_str(name.as_str()) {
         Some(WindowFunction::AggregateFunction(aggregate))
+        // 通过名字查找内建窗口函数
     } else if let Ok(built_in_function) = BuiltInWindowFunction::from_str(name.as_str()) {
         Some(WindowFunction::BuiltInWindowFunction(built_in_function))
     } else {
@@ -80,6 +86,7 @@ impl fmt::Display for WindowFunction {
 }
 
 /// An aggregate function that is part of a built-in window function
+/// 内置窗口函数
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltInWindowFunction {
     /// number of the current row within its partition, counting from 1
@@ -137,12 +144,14 @@ impl FromStr for BuiltInWindowFunction {
 }
 
 /// Returns the datatype of the window function
+/// 根据参数类型和聚合函数 判断返回结果类型
 pub fn return_type(
     fun: &WindowFunction,
     input_expr_types: &[DataType],
 ) -> Result<DataType> {
     match fun {
         WindowFunction::AggregateFunction(fun) => {
+            // 可以根据参数类型 推断出结果类型
             aggregate_function::return_type(fun, input_expr_types)
         }
         WindowFunction::BuiltInWindowFunction(fun) => {
@@ -155,6 +164,7 @@ pub fn return_type(
 }
 
 /// Returns the datatype of the built-in window function
+/// 内建函数的返回类型 一般是固定的
 fn return_type_for_built_in(
     fun: &BuiltInWindowFunction,
     input_expr_types: &[DataType],

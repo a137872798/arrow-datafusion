@@ -43,6 +43,7 @@ use std::time::Instant;
 /// This is different than an [`OptimizerRule`](crate::OptimizerRule)
 /// which should preserve the semantics of the LogicalPlan but compute
 /// it the same result in some more optimal way.
+/// 对逻辑计划进行分析  优化前需要先分析
 pub trait AnalyzerRule {
     /// Rewrite `plan`
     fn analyze(&self, plan: LogicalPlan, config: &ConfigOptions) -> Result<LogicalPlan>;
@@ -50,7 +51,7 @@ pub trait AnalyzerRule {
     /// A human readable name for this analyzer rule
     fn name(&self) -> &str;
 }
-/// A rule-based Analyzer.
+/// A rule-based Analyzer.  分析器内部包含一组规则
 #[derive(Clone)]
 pub struct Analyzer {
     /// All rules to apply
@@ -67,8 +68,9 @@ impl Analyzer {
     /// Create a new analyzer using the recommended list of rules
     pub fn new() -> Self {
         let rules: Vec<Arc<dyn AnalyzerRule + Send + Sync>> = vec![
+            // 内置了3个分析规则
             Arc::new(InlineTableScan::new()),
-            Arc::new(TypeCoercion::new()),
+            Arc::new(TypeCoercion::new()),  // 强制类型转换
             Arc::new(CountWildcardRule::new()),
         ];
         Self::with_rules(rules)
@@ -81,11 +83,12 @@ impl Analyzer {
 
     /// Analyze the logical plan by applying analyzer rules, and
     /// do necessary check and fail the invalid plans
+    /// 通过分析器分析逻辑计划
     pub fn execute_and_check<F>(
         &self,
         plan: &LogicalPlan,
         config: &ConfigOptions,
-        mut observer: F,
+        mut observer: F,  // 额外的逻辑
     ) -> Result<LogicalPlan>
     where
         F: FnMut(&LogicalPlan, &dyn AnalyzerRule),
@@ -95,13 +98,15 @@ impl Analyzer {
 
         // TODO add common rule executor for Analyzer and Optimizer
         for rule in &self.rules {
+            // 挨个使用rule进行分析
             new_plan = rule.analyze(new_plan, config).map_err(|e| {
                 DataFusionError::Context(rule.name().to_string(), Box::new(e))
             })?;
             log_plan(rule.name(), &new_plan);
+            // 执行额外逻辑
             observer(&new_plan, rule.as_ref());
         }
-        // for easier display in explain output
+        // for easier display in explain output   经过一轮分析后 检查计划是否有效
         check_plan(&new_plan).map_err(|e| {
             DataFusionError::Context("check_analyzed_plan".to_string(), Box::new(e))
         })?;
@@ -111,15 +116,18 @@ impl Analyzer {
     }
 }
 
-/// Do necessary check and fail the invalid plan
+/// Do necessary check and fail the invalid plan  检查计划
 fn check_plan(plan: &LogicalPlan) -> Result<()> {
     plan.apply(&mut |plan: &LogicalPlan| {
+
+        // 检查表达式
         for expr in plan.expressions().iter() {
             // recursively look for subqueries
             inspect_expr_pre(expr, |expr| match expr {
                 Expr::Exists { subquery, .. }
                 | Expr::InSubquery { subquery, .. }
                 | Expr::ScalarSubquery(subquery) => {
+                    // 相当于递归检查
                     check_subquery_expr(plan, &subquery.subquery, expr)
                 }
                 _ => Ok(()),

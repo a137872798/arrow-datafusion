@@ -23,12 +23,16 @@ use datafusion_expr::{Case, Expr, GetIndexedField};
 use sqlparser::ast::{Expr as SQLExpr, Ident};
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 将Ident转换成表达式
     pub(super) fn sql_identifier_to_expr(
         &self,
         id: Ident,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+
+        // TODO
         if id.value.starts_with('@') {
             // TODO: figure out if ScalarVariables should be insensitive.
             let var_names = vec![id.value];
@@ -47,6 +51,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             // compound identifiers, but this is not a compound
             // identifier. (e.g. it is "foo.bar" not foo.bar)
             let normalize_ident = self.normalizer.normalize(id);
+            // 从schema中找到对应字段
             match schema.field_with_unqualified_name(normalize_ident.as_str()) {
                 Ok(_) => {
                     // found a match without a qualified name, this is a inner table column
@@ -57,6 +62,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 }
                 Err(_) => {
                     // check the outer_query_schema and try to find a match
+                    // 尝试从外部schema查询
                     if let Some(outer) = planner_context.outer_query_schema() {
                         match outer.field_with_unqualified_name(normalize_ident.as_str())
                         {
@@ -199,6 +205,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         }
     }
 
+    // 对应 case when other 表达式
     pub(super) fn sql_case_identifier_to_expr(
         &self,
         operand: Option<Box<SQLExpr>>,
@@ -208,6 +215,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
     ) -> Result<Expr> {
+
+        // 简单的解析 + 组合
         let expr = if let Some(e) = operand {
             Some(Box::new(self.sql_expr_to_logical_expr(
                 *e,

@@ -81,16 +81,19 @@ impl UnwrapCastInComparison {
     }
 }
 
+/// 处理cast
 impl OptimizerRule for UnwrapCastInComparison {
     fn try_optimize(
         &self,
         plan: &LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> Result<Option<LogicalPlan>> {
+        // 根据输入的逻辑计划 产生一个schema
         let mut schema = merge_schema(plan.inputs());
 
         schema.merge(plan.schema());
 
+        // 生成改写对象
         let mut expr_rewriter = UnwrapCastExprRewriter {
             schema: Arc::new(schema),
         };
@@ -113,6 +116,7 @@ impl OptimizerRule for UnwrapCastInComparison {
         "unwrap_cast_in_comparison"
     }
 
+    // 自底向上触发
     fn apply_order(&self) -> Option<ApplyOrder> {
         Some(ApplyOrder::BottomUp)
     }
@@ -122,6 +126,7 @@ struct UnwrapCastExprRewriter {
     schema: DFSchemaRef,
 }
 
+// 通过该对象改写节点
 impl TreeNodeRewriter for UnwrapCastExprRewriter {
     type N = Expr;
 
@@ -129,11 +134,13 @@ impl TreeNodeRewriter for UnwrapCastExprRewriter {
         Ok(RewriteRecursion::Continue)
     }
 
+    // 改写节点数据
     fn mutate(&mut self, expr: Expr) -> Result<Expr> {
         match &expr {
             // For case:
             // try_cast/cast(expr as data_type) op literal
             // literal op try_cast/cast(expr as data_type)
+            // 将内部值转换成对应类型
             Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
                 let left = left.as_ref().clone();
                 let right = right.as_ref().clone();
@@ -144,6 +151,7 @@ impl TreeNodeRewriter for UnwrapCastExprRewriter {
                     && is_support_data_type(&right_type)
                     && is_comparison_op(op)
                 {
+                    // 单侧是cast/tryCast
                     match (&left, &right) {
                         (
                             Expr::Literal(left_lit_value),
@@ -160,6 +168,7 @@ impl TreeNodeRewriter for UnwrapCastExprRewriter {
                                 return Ok(binary_expr(
                                     lit(value),
                                     *op,
+                                    // 解开cast包装
                                     expr.as_ref().clone(),
                                 ));
                             }

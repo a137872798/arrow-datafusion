@@ -57,6 +57,8 @@ impl OptimizerRule for SimplifyExpressions {
 }
 
 impl SimplifyExpressions {
+
+    // 优化方法
     fn optimize_internal(
         plan: &LogicalPlan,
         execution_props: &ExecutionProps,
@@ -64,8 +66,11 @@ impl SimplifyExpressions {
         // Pass down the `children merge schema` and `plan schema` to evaluate expression types.
         // pass all `child schema` and `plan schema` isn't enough, because like `t1 semi join t2 on
         // on t1.id = t2.id`, each individual schema can't contain all the columns in it.
+        // 合并plan的schema
         let children_merge_schema = DFSchemaRef::new(merge_schema(plan.inputs()));
         let schemas = vec![plan.schema(), &children_merge_schema];
+
+        // 将schema填充到context中
         let info = schemas
             .into_iter()
             .fold(SimplifyContext::new(execution_props), |context, schema| {
@@ -77,6 +82,7 @@ impl SimplifyExpressions {
         let new_inputs = plan
             .inputs()
             .iter()
+            // 递归优化
             .map(|input| Self::optimize_internal(input, execution_props))
             .collect::<Result<Vec<_>>>()?;
 
@@ -89,6 +95,7 @@ impl SimplifyExpressions {
                 let name = &e.display_name();
 
                 // Apply the actual simplification logic
+                // 对本plan下所有expr进行优化   整个相当于是递归逻辑 所以会覆盖到所有expr
                 let new_e = simplifier.simplify(e)?;
 
                 let new_name = &new_e.display_name();

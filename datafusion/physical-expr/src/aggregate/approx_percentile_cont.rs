@@ -33,14 +33,14 @@ use datafusion_common::{downcast_value, ScalarValue};
 use datafusion_expr::Accumulator;
 use std::{any::Any, iter, sync::Arc};
 
-/// APPROX_PERCENTILE_CONT aggregate expression
+/// APPROX_PERCENTILE_CONT aggregate expression    近似百分位 对应T-Digests算法
 #[derive(Debug)]
 pub struct ApproxPercentileCont {
     name: String,
     input_data_type: DataType,
     expr: Vec<Arc<dyn PhysicalExpr>>,
-    percentile: f64,
-    tdigest_max_size: Option<usize>,
+    percentile: f64,  // 初始百分比 0～1
+    tdigest_max_size: Option<usize>,   // 接受的最大值
 }
 
 impl ApproxPercentileCont {
@@ -53,6 +53,7 @@ impl ApproxPercentileCont {
         // Arguments should be [ColumnExpr, DesiredPercentileLiteral]
         debug_assert_eq!(expr.len(), 2);
 
+        // 要求 expr[1] 必须是0～1的浮点数
         let percentile = validate_input_percentile_expr(&expr[1])?;
 
         Ok(Self {
@@ -85,6 +86,7 @@ impl ApproxPercentileCont {
         })
     }
 
+    // 产生累加器
     pub(crate) fn create_plain_accumulator(&self) -> Result<ApproxPercentileAccumulator> {
         let accumulator: ApproxPercentileAccumulator = match &self.input_data_type {
             t @ (DataType::UInt8
@@ -98,6 +100,7 @@ impl ApproxPercentileCont {
             | DataType::Float32
             | DataType::Float64) => {
                 if let Some(max_size) = self.tdigest_max_size {
+                    // 追加一个最大值限制
                     ApproxPercentileAccumulator::new_with_max_size(self.percentile, t.clone(), max_size)
 
                 }else{
@@ -130,11 +133,12 @@ impl PartialEq for ApproxPercentileCont {
     }
 }
 
+// 对表达式进行校验
 fn validate_input_percentile_expr(expr: &Arc<dyn PhysicalExpr>) -> Result<f64> {
     // Extract the desired percentile literal
     let lit = expr
         .as_any()
-        .downcast_ref::<Literal>()
+        .downcast_ref::<Literal>()  // 必须是一个float的值
         .ok_or_else(|| {
             DataFusionError::Internal(
                 "desired percentile argument must be float literal".to_string(),
@@ -150,7 +154,7 @@ fn validate_input_percentile_expr(expr: &Arc<dyn PhysicalExpr>) -> Result<f64> {
         )))
     };
 
-    // Ensure the percentile is between 0 and 1.
+    // Ensure the percentile is between 0 and 1.  必须是0～1之间的浮点数
     if !(0.0..=1.0).contains(&percentile) {
         return Err(DataFusionError::Plan(format!(
             "Percentile value must be between 0.0 and 1.0 inclusive, {percentile} is invalid"
@@ -159,6 +163,7 @@ fn validate_input_percentile_expr(expr: &Arc<dyn PhysicalExpr>) -> Result<f64> {
     Ok(percentile)
 }
 
+// 校验max_size是否合法  好像>0都可以
 fn validate_input_max_size_expr(expr: &Arc<dyn PhysicalExpr>) -> Result<usize> {
     // Extract the desired percentile literal
     let lit = expr
@@ -198,7 +203,7 @@ impl AggregateExpr for ApproxPercentileCont {
 
     #[allow(rustdoc::private_intra_doc_links)]
     /// See [`TDigest::to_scalar_state()`] for a description of the serialised
-    /// state.
+    /// state.  这些状态 它都能返回
     fn state_fields(&self) -> Result<Vec<Field>> {
         Ok(vec![
             Field::new(
@@ -259,8 +264,8 @@ impl PartialEq<dyn Any> for ApproxPercentileCont {
 
 #[derive(Debug)]
 pub struct ApproxPercentileAccumulator {
-    digest: TDigest,
-    percentile: f64,
+    digest: TDigest,  // 可接受最大值
+    percentile: f64,  // 初始百分比
     return_type: DataType,
 }
 
@@ -379,6 +384,8 @@ impl ApproxPercentileAccumulator {
 }
 
 impl Accumulator for ApproxPercentileAccumulator {
+
+    // digest算法自带的
     fn state(&self) -> Result<Vec<ScalarValue>> {
         Ok(self.digest.to_scalar_state().into_iter().collect())
     }
@@ -397,6 +404,7 @@ impl Accumulator for ApproxPercentileAccumulator {
                 "aggregate function needs at least one non-null element".to_string(),
             ));
         }
+        // 评估出一个百分比
         let q = self.digest.estimate_quantile(self.percentile);
 
         // These acceptable return types MUST match the validation in

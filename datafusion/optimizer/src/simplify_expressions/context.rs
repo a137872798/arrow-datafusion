@@ -29,6 +29,7 @@ use datafusion_physical_expr::execution_props::ExecutionProps;
 /// This trait exists so that other systems can plug schema
 /// information in without having to create `DFSchema` objects. If you
 /// have a [`DFSchemaRef`] you can use [`SimplifyContext`]
+/// 可以提供一些expr的信息
 pub trait SimplifyInfo {
     /// returns true if this Expr has boolean type
     fn is_boolean_type(&self, expr: &Expr) -> Result<bool>;
@@ -76,8 +77,8 @@ pub trait SimplifyInfo {
 /// assert_eq!(simplified, col("b").lt(lit(2)));
 /// ```
 pub struct SimplifyContext<'a> {
-    schemas: Vec<DFSchemaRef>,
-    props: &'a ExecutionProps,
+    schemas: Vec<DFSchemaRef>,  // logicalPlan对应的所有schema (包括plan内部有值的情况)
+    props: &'a ExecutionProps,  // 可以提供一些标量
 }
 
 impl<'a> SimplifyContext<'a> {
@@ -98,6 +99,7 @@ impl<'a> SimplifyContext<'a> {
 
 impl<'a> SimplifyInfo for SimplifyContext<'a> {
     /// returns true if this Expr has boolean type
+    /// 只要有任意一个schema包含该列即可
     fn is_boolean_type(&self, expr: &Expr) -> Result<bool> {
         for schema in &self.schemas {
             if let Ok(DataType::Boolean) = expr.get_type(schema) {

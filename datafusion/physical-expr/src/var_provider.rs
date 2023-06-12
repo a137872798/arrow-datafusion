@@ -20,7 +20,7 @@
 use arrow::datatypes::DataType;
 use datafusion_common::{Result, ScalarValue};
 
-/// Variable type, system/user defined
+/// Variable type, system/user defined  该变量是系统内置的还是用户定义的
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VarType {
     /// System variable, like @@version
@@ -29,7 +29,7 @@ pub enum VarType {
     UserDefined,
 }
 
-/// A var provider for @variable
+/// A var provider for @variable  用于获取标量值
 pub trait VarProvider: std::fmt::Debug {
     /// Get variable value
     fn get_value(&self, var_names: Vec<String>) -> Result<ScalarValue>;

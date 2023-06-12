@@ -52,8 +52,10 @@ pub struct FileRange {
 /// A single file or part of a file that should be read, along with its schema, statistics
 /// A single file that should be read, along with its schema, statistics
 /// and partition column values that need to be appended to each row.
+/// 可分区文件
 pub struct PartitionedFile {
     /// Path for the file (e.g. URL, filesystem path, etc)
+    /// 对应某个文件的元数据
     pub object_meta: ObjectMeta,
     /// Values of partition columns to be appended to each row.
     ///
@@ -65,8 +67,10 @@ pub struct PartitionedFile {
     /// [`wrap_partition_type_in_dict`]: crate::physical_plan::file_format::wrap_partition_type_in_dict
     /// [`wrap_partition_value_in_dict`]: crate::physical_plan::file_format::wrap_partition_value_in_dict
     /// [`table_partition_cols`]: table::ListingOptions::table_partition_cols
+    /// 分区文件 如何将它们划分分区  依靠的就是这组分区键的值  值就记录在该字段中
     pub partition_values: Vec<ScalarValue>,
     /// An optional file range for a more fine-grained parallel execution
+    /// 文件被拆分为多个部分  partition_values 代表影响分区的值 比如上下限？
     pub range: Option<FileRange>,
     /// An optional field for user defined per object metadata
     pub extensions: Option<Arc<dyn std::any::Any + Send + Sync>>,
@@ -74,6 +78,7 @@ pub struct PartitionedFile {
 
 impl PartitionedFile {
     /// Create a simple file without metadata or partition
+    /// 创建空文件 里头啥都没
     pub fn new(path: String, size: u64) -> Self {
         Self {
             object_meta: ObjectMeta {
@@ -88,6 +93,7 @@ impl PartitionedFile {
     }
 
     /// Create a file range without metadata or partition
+    /// 比上面多一个range
     pub fn new_with_range(path: String, size: u64, start: i64, end: i64) -> Self {
         Self {
             object_meta: ObjectMeta {

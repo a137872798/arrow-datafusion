@@ -43,14 +43,15 @@ use super::{
 ///    .counter("num_bytes", partition);
 ///
 /// ```
+/// 该对象负责构建指标
 pub struct MetricBuilder<'a> {
-    /// Location that the metric created by this builder will be added do
+    /// Location that the metric created by this builder will be added do  指标集  builder构建出来的指标会存储到这里
     metrics: &'a ExecutionPlanMetricsSet,
 
-    /// optional partition number
+    /// optional partition number   构建出的指标针对的分区
     partition: Option<usize>,
 
-    /// arbitrary name=value pairs identifiying this metric
+    /// arbitrary name=value pairs identifiying this metric  针对该指标的一些标签  标签用key/value表示
     labels: Vec<Label>,
 }
 
@@ -87,6 +88,7 @@ impl<'a> MetricBuilder<'a> {
 
     /// Consume self and create a metric of the specified value
     /// registered with the MetricsSet
+    /// 通过builder生成新的指标后 注册到指标集
     pub fn build(self, value: MetricValue) {
         let Self {
             labels,
@@ -98,6 +100,7 @@ impl<'a> MetricBuilder<'a> {
     }
 
     /// Consume self and create a new counter for recording output rows
+    /// 创建的时候默认都是空的
     pub fn output_rows(self, partition: usize) -> Count {
         let count = Count::new();
         self.with_partition(partition)

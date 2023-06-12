@@ -35,10 +35,13 @@ use url::Url;
 /// Execution runtime environment.
 pub struct RuntimeEnv {
     /// Runtime memory management
+    /// 内存池管理内存开销
     pub memory_pool: Arc<dyn MemoryPool>,
     /// Manage temporary files during query execution
+    /// 管理使用的临时文件
     pub disk_manager: Arc<DiskManager>,
     /// Object Store Registry
+    /// 管理对象存储
     pub object_store_registry: Arc<dyn ObjectStoreRegistry>,
 }
 
@@ -57,6 +60,7 @@ impl RuntimeEnv {
             object_store_registry,
         } = config;
 
+        // UnboundedMemoryPool仅记录内存开销 不能起到限制作用
         let memory_pool =
             memory_pool.unwrap_or_else(|| Arc::new(UnboundedMemoryPool::default()));
 
@@ -100,7 +104,7 @@ impl Default for RuntimeEnv {
 }
 
 #[derive(Clone)]
-/// Execution runtime configuration
+/// Execution runtime configuration  配置项就是包含这些元素
 pub struct RuntimeConfig {
     /// DiskManager to manage temporary disk file usage
     pub disk_manager: DiskManagerConfig,

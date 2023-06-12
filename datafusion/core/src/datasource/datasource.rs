@@ -32,6 +32,7 @@ use crate::logical_expr::Expr;
 use crate::physical_plan::ExecutionPlan;
 
 /// Source table
+/// 其实就是表  并开放了表信息相关的api
 #[async_trait]
 pub trait TableProvider: Sync + Send {
     /// Returns the table provider as [`Any`](std::any::Any) so that it can be
@@ -39,17 +40,21 @@ pub trait TableProvider: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     /// Get a reference to the schema for this table
+    /// 获取表的元数据信息
     fn schema(&self) -> SchemaRef;
 
     /// Get the type of this table for metadata/catalog purposes.
+    /// 表类型
     fn table_type(&self) -> TableType;
 
     /// Get the create statement used to create this table, if available.
+    /// 获取创建表的stmt
     fn get_table_definition(&self) -> Option<&str> {
         None
     }
 
     /// Get the Logical Plan of this table, if available.
+    /// 获取表的执行计划
     fn get_logical_plan(&self) -> Option<&LogicalPlan> {
         None
     }
@@ -58,16 +63,17 @@ pub trait TableProvider: Sync + Send {
     /// The table provider will be usually responsible of grouping
     /// the source data into partitions that can be efficiently
     /// parallelized or distributed.
+    /// 将对source发起的一次查询操作包装成物理计划
     async fn scan(
         &self,
-        state: &SessionState,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        state: &SessionState,   // 查询时的会话状态
+        projection: Option<&Vec<usize>>,  // 代表需要查询哪几列
+        filters: &[Expr],  // 通过一组表达式过滤结果集
         // limit can be used to reduce the amount scanned
         // from the datasource as a performance optimization.
         // If set, it contains the amount of rows needed by the `LogicalPlan`,
         // The datasource should return *at least* this number of rows if available.
-        limit: Option<usize>,
+        limit: Option<usize>,  // 是否对返回结果有数量限制
     ) -> Result<Arc<dyn ExecutionPlan>>;
 
     /// Tests whether the table provider can make use of a filter expression
@@ -94,11 +100,13 @@ pub trait TableProvider: Sync + Send {
     }
 
     /// Get statistics for this table, if available
+    /// 对表的一些数据的统计
     fn statistics(&self) -> Option<Statistics> {
         None
     }
 
     /// Insert into this table
+    /// 执行计划
     async fn insert_into(
         &self,
         _state: &SessionState,

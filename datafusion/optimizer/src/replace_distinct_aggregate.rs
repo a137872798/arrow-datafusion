@@ -45,6 +45,7 @@ impl ReplaceDistinctWithAggregate {
     }
 }
 
+// 将DISTINCT 改写成group by
 impl OptimizerRule for ReplaceDistinctWithAggregate {
     fn try_optimize(
         &self,
@@ -52,12 +53,14 @@ impl OptimizerRule for ReplaceDistinctWithAggregate {
         _config: &dyn OptimizerConfig,
     ) -> Result<Option<LogicalPlan>> {
         match plan {
+            // 只处理去重类型的
             LogicalPlan::Distinct(Distinct { input }) => {
+                // 获取要展示的列
                 let group_expr = expand_wildcard(input.schema(), input)?;
                 let aggregate = LogicalPlan::Aggregate(Aggregate::try_new_with_schema(
                     input.clone(),
-                    group_expr,
-                    vec![],
+                    group_expr,  // 将要展示的列作为分组列
+                    vec![],  // 不使用聚合函数  然后group by 只会展示第一条
                     input.schema().clone(), // input schema and aggregate schema are the same in this case
                 )?);
                 Ok(Some(aggregate))

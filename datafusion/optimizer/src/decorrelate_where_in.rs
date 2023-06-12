@@ -49,11 +49,13 @@ impl DecorrelateWhereIn {
     /// * `optimizer_config` - For generating unique subquery aliases
     ///
     /// Returns a tuple (subqueries, non-subquery expressions)
+    /// 提取出子查询
     fn extract_subquery_exprs(
         &self,
         predicate: &Expr,
         config: &dyn OptimizerConfig,
     ) -> Result<(Vec<SubqueryInfo>, Vec<Expr>)> {
+        // 将filter中的expr提取出来
         let filters = split_conjunction(predicate); // TODO: disjunctions
 
         let mut subqueries = vec![];
@@ -92,6 +94,7 @@ impl OptimizerRule for DecorrelateWhereIn {
         config: &dyn OptimizerConfig,
     ) -> Result<Option<LogicalPlan>> {
         match plan {
+            // 也是针对filter
             LogicalPlan::Filter(filter) => {
                 let (subqueries, other_exprs) =
                     self.extract_subquery_exprs(&filter.predicate, config)?;
@@ -102,10 +105,12 @@ impl OptimizerRule for DecorrelateWhereIn {
 
                 // iterate through all exists clauses in predicate, turning each into a join
                 let mut cur_input = filter.input.as_ref().clone();
+                // 将子查询作用到plan上
                 for subquery in subqueries {
                     cur_input = optimize_where_in(&subquery, &cur_input, &self.alias)?;
                 }
 
+                // 剩下的包裹成filter
                 let expr = conjunction(other_exprs);
                 if let Some(expr) = expr {
                     let new_filter = Filter::try_new(expr, Arc::new(cur_input))?;
@@ -142,14 +147,17 @@ impl OptimizerRule for DecorrelateWhereIn {
 ///     SubqueryAlias: __correlated_sq_1
 ///       Projection: t2.a AS a, t2.b, t2.c
 ///         TableScan: t2
+/// 将子查询作用到plan上
 /// ```
 fn optimize_where_in(
     query_info: &SubqueryInfo,
     left: &LogicalPlan,
     alias: &AliasGenerator,
 ) -> Result<LogicalPlan> {
+    // 要求必须是Projection类型
     let projection = Projection::try_from_plan(&query_info.query.subquery)
         .map_err(|e| context!("a projection is required", e))?;
+    //
     let subquery_input = projection.input.clone();
     // TODO add the validate logic to Analyzer
     let subquery_expr = only_or_err(projection.expr.as_slice())

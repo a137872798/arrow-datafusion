@@ -22,6 +22,8 @@ use sqlparser::ast::{Join, JoinConstraint, JoinOperator, TableWithJoins};
 use std::collections::HashSet;
 
 impl<'a, S: ContextProvider> SqlToRel<'a, S> {
+
+    // 生成表查询计划 考虑连表的情况
     pub(crate) fn plan_table_with_joins(
         &self,
         t: TableWithJoins,
@@ -33,12 +35,16 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         // So always use original global CTEs to plan CTEs in from clause.
         // Btw, don't need to add CTEs in from to global CTEs.
         let origin_planner_context = planner_context.clone();
+
+        // 生成针对某个表的查询计划
         let left = self.create_relation(t.relation, planner_context)?;
         match t.joins.len() {
             0 => {
+                // 代表单表查询(也可能是子查询) 没有连表操作
                 *planner_context = origin_planner_context;
                 Ok(left)
             }
+            // 代表有连表操作
             _ => {
                 let mut joins = t.joins.into_iter();
                 *planner_context = origin_planner_context.clone();
@@ -47,6 +53,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     joins.next().unwrap(), // length of joins > 0
                     planner_context,
                 )?;
+                // 代表有多层join 将逻辑附加到plan上
                 for join in joins {
                     *planner_context = origin_planner_context.clone();
                     left = self.parse_relation_join(left, join, planner_context)?;
@@ -57,14 +64,19 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         }
     }
 
+    // 解析join表达式
     fn parse_relation_join(
         &self,
-        left: LogicalPlan,
-        join: Join,
+        left: LogicalPlan,  // 代表左表的查询计划
+        join: Join,  // 包含右表信息以及连接信息  (左右表通过什么连接)
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
+
+        // 生成右表的查询计划
         let right = self.create_relation(join.relation, planner_context)?;
         match join.join_operator {
+
+            // 根据不同连接方式 产生不同的执行计划   constraint 代表连接的约束
             JoinOperator::LeftOuter(constraint) => {
                 self.parse_join(left, right, constraint, JoinType::Left, planner_context)
             }
@@ -120,18 +132,21 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         LogicalPlanBuilder::from(left).cross_join(right)?.build()
     }
 
+    // 基于左右表和连接条件 生成新的执行计划
     fn parse_join(
         &self,
         left: LogicalPlan,
         right: LogicalPlan,
-        constraint: JoinConstraint,
-        join_type: JoinType,
+        constraint: JoinConstraint,  // 代表连接约束(条件)
+        join_type: JoinType,   // 连接类型
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
         match constraint {
             JoinConstraint::On(sql_expr) => {
+                // 合并后的结果表需要包含所有相关字段
                 let join_schema = left.schema().join(right.schema())?;
                 // parse ON expression
+                // sql_to_expr方法可以将sqlexpr转换成expr
                 let expr = self.sql_to_expr(sql_expr, &join_schema, planner_context)?;
                 LogicalPlanBuilder::from(left)
                     .join(
@@ -142,6 +157,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                     )?
                     .build()
             }
+
+            // TODO 先只看最熟悉的情况 join on
+
             JoinConstraint::Using(idents) => {
                 let keys: Vec<Column> = idents
                     .into_iter()

@@ -26,6 +26,7 @@ use std::{any::Any, cmp::Eq, collections::HashSet, fmt, sync::Arc};
 ///
 /// The [`UserDefinedLogicalNodeCore`] trait is *the recommended way to implement*
 /// this trait and avoids having implementing some required boiler plate code.
+/// 用户定义的逻辑节点 TODO 这个是拓展功能  目前没有内置实现 先忽略
 pub trait UserDefinedLogicalNode: fmt::Debug + Send + Sync {
     /// Return a reference to self as Any, to support dynamic downcasting
     ///

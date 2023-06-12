@@ -54,14 +54,16 @@ mod distributor_channels;
 
 type MaybeBatch = Option<Result<RecordBatch>>;
 
-/// Inner state of [`RepartitionExec`].
+/// Inner state of [`RepartitionExec`].  维护分区的状态
 #[derive(Debug)]
 struct RepartitionExecState {
     /// Channels for sending batches from input partitions to output partitions.
     /// Key is the partition number.
+    /// 维护n组通道 数量等同于输出的分区数
     channels: HashMap<
-        usize,
+        usize,  // 对应分区号
         (
+            // 每个分区一个发送者 一个接收者 他们使用同一个channel进行通信
             DistributionSender<MaybeBatch>,
             DistributionReceiver<MaybeBatch>,
             SharedMemoryReservation,
@@ -69,25 +71,30 @@ struct RepartitionExecState {
     >,
 
     /// Helper that ensures that that background job is killed once it is no longer needed.
+    /// 用于终止正在进行的后台任务
     abort_helper: Arc<AbortOnDropMany<()>>,
 }
 
 /// A utility that can be used to partition batches based on [`Partitioning`]
+/// 用于对批数据进行分区
 pub struct BatchPartitioner {
-    state: BatchPartitionerState,
-    timer: metrics::Time,
+    state: BatchPartitionerState,  // 维护分区状态
+    timer: metrics::Time,  // 记录时间的
 }
 
+// 不同分区算法 需要维护的状态不同
 enum BatchPartitionerState {
     Hash {
         random_state: ahash::RandomState,
-        exprs: Vec<Arc<dyn PhysicalExpr>>,
-        num_partitions: usize,
+        exprs: Vec<Arc<dyn PhysicalExpr>>,  // 参与hash计算的列
+        num_partitions: usize,  // 下游总分区数
         hash_buffer: Vec<u64>,
     },
+
+    // 代表上游的每部分数据会以轮询的方式 进入到下游的不同分区
     RoundRobin {
-        num_partitions: usize,
-        next_idx: usize,
+        num_partitions: usize,  // 总分区数
+        next_idx: usize,  // 下个要分派到的分区
     },
 }
 
@@ -95,14 +102,17 @@ impl BatchPartitioner {
     /// Create a new [`BatchPartitioner`] with the provided [`Partitioning`]
     ///
     /// The time spent repartitioning will be recorded to `timer`
+    /// 基于分区算法 初始化分区对象
     pub fn try_new(partitioning: Partitioning, timer: metrics::Time) -> Result<Self> {
         let state = match partitioning {
+            // 轮询算法
             Partitioning::RoundRobinBatch(num_partitions) => {
                 BatchPartitionerState::RoundRobin {
                     num_partitions,
                     next_idx: 0,
                 }
             }
+            // 根据某些col的hash结果判断进入哪个分区  能确保的是相同分区键值的列一定会进入同一分区
             Partitioning::Hash(exprs, num_partitions) => BatchPartitionerState::Hash {
                 exprs,
                 num_partitions,
@@ -129,6 +139,7 @@ impl BatchPartitioner {
     ///
     /// The time spent repartitioning, not including time spent in `f` will be recorded
     /// to the [`metrics::Time`] provided on construction
+    /// 将函数作用到分发到每个分区的数据
     pub fn partition<F>(&mut self, batch: RecordBatch, mut f: F) -> Result<()>
     where
         F: FnMut(usize, RecordBatch) -> Result<()>,
@@ -144,12 +155,15 @@ impl BatchPartitioner {
     /// The reason this was pulled out is that we need to have a variant of `partition` that works w/ sync functions,
     /// and one that works w/ async. Using an iterator as an intermediate representation was the best way to achieve
     /// this (so we don't need to clone the entire implementation).
+    /// 为进入的数据集分区
     fn partition_iter(
         &mut self,
         batch: RecordBatch,
     ) -> Result<impl Iterator<Item = Result<(usize, RecordBatch)>> + Send + '_> {
         let it: Box<dyn Iterator<Item = Result<(usize, RecordBatch)>> + Send> =
             match &mut self.state {
+
+                // 如果是基于轮询算法进行分区
                 BatchPartitionerState::RoundRobin {
                     num_partitions,
                     next_idx,
@@ -158,6 +172,8 @@ impl BatchPartitioner {
                     *next_idx = (*next_idx + 1) % *num_partitions;
                     Box::new(std::iter::once(Ok((idx, batch))))
                 }
+
+                // hash分区会复杂些  每批数据按照不同的hash值分给不同分区
                 BatchPartitionerState::Hash {
                     random_state,
                     exprs,
@@ -166,6 +182,7 @@ impl BatchPartitioner {
                 } => {
                     let timer = self.timer.timer();
 
+                    // 得到影响分区的列数据
                     let arrays = exprs
                         .iter()
                         .map(|expr| {
@@ -176,17 +193,21 @@ impl BatchPartitioner {
                     hash_buffer.clear();
                     hash_buffer.resize(batch.num_rows(), 0);
 
+                    // 计算这些列值的hash值
                     create_hashes(&arrays, random_state, hash_buffer)?;
 
+                    // 先给每个对象分配足够的空间
                     let mut indices: Vec<_> = (0..*partitions)
                         .map(|_| UInt64Builder::with_capacity(batch.num_rows()))
                         .collect();
 
                     for (index, hash) in hash_buffer.iter().enumerate() {
                         indices[(*hash % *partitions as u64) as usize]
+                            // 找到分区插入行号
                             .append_value(index as u64);
                     }
 
+                    //
                     let it = indices
                         .into_iter()
                         .enumerate()
@@ -194,8 +215,10 @@ impl BatchPartitioner {
                             let indices = indices.finish();
                             (!indices.is_empty()).then_some((partition, indices))
                         })
+                        // 处理每个分区对应的行号
                         .map(move |(partition, indices)| {
                             // Produce batches based on indices
+                            // 把每个列对应行号的数据抽取出来
                             let columns = batch
                                 .columns()
                                 .iter()
@@ -205,6 +228,7 @@ impl BatchPartitioner {
                                 })
                                 .collect::<Result<Vec<ArrayRef>>>()?;
 
+                            // 生成应当分发到该分区下的数据集
                             let batch =
                                 RecordBatch::try_new(batch.schema(), columns).unwrap();
 
@@ -224,21 +248,23 @@ impl BatchPartitioner {
 
 /// The repartition operator maps N input partitions to M output partitions based on a
 /// partitioning scheme. No guarantees are made about the order of the resulting partitions.
+/// 该对象实现了 ExecutionPlan特征 可以通过execute得到结果
 #[derive(Debug)]
 pub struct RepartitionExec {
-    /// Input execution plan
+    /// Input execution plan   看来是一层包装 对内部的结果进行再分区
     input: Arc<dyn ExecutionPlan>,
 
-    /// Partitioning scheme to use
+    /// Partitioning scheme to use  分区算法
     partitioning: Partitioning,
 
-    /// Inner state that is initialized when the first output stream is created.
+    /// Inner state that is initialized when the first output stream is created.  上游产生的数据集 通过内部的管道分发到下游(不同管道)
     state: Arc<Mutex<RepartitionExecState>>,
 
-    /// Execution metrics
+    /// Execution metrics  存储执行过程中的各种指标
     metrics: ExecutionPlanMetricsSet,
 }
 
+// 记录一些再分组的指标信息
 #[derive(Debug, Clone)]
 struct RepartitionMetrics {
     /// Time in nanos to execute child operator and fetch batches
@@ -256,6 +282,8 @@ impl RepartitionMetrics {
         metrics: &ExecutionPlanMetricsSet,
     ) -> Self {
         let label = metrics::Label::new("inputPartition", input_partition.to_string());
+
+        // 初始化3个指标  都会存入到ExecutionPlanMetricsSet中
 
         // Time in nanos to execute child operator and fetch batches
         let fetch_time = MetricBuilder::new(metrics)
@@ -292,21 +320,24 @@ impl RepartitionExec {
     }
 }
 
+// 重分区执行计划
 impl ExecutionPlan for RepartitionExec {
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    /// Get the schema for this execution plan
+    /// Get the schema for this execution plan   该计划不会修改展示数据的结构
     fn schema(&self) -> SchemaRef {
         self.input.schema()
     }
 
+    /// 内部计划就是子计划
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
         vec![self.input.clone()]
     }
 
+    /// 将给定的child包装成 执行计划
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -328,23 +359,29 @@ impl ExecutionPlan for RepartitionExec {
         self.partitioning.clone()
     }
 
+    /// 返回排序相关的部分
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+        // 保持跟input一样的顺序  就返回input的output_ordering
         if self.maintains_input_order()[0] {
             self.input().output_ordering()
         } else {
+            // 否则是无序的
             None
         }
     }
 
+    /// 代表保持跟input一样的顺序
     fn maintains_input_order(&self) -> Vec<bool> {
-        // We preserve ordering when input partitioning is 1
+        // We preserve ordering when input partitioning is 1  只有当分区数为1时才能保证顺序
         vec![self.input().output_partitioning().partition_count() <= 1]
     }
 
+    /// 相等属性
     fn equivalence_properties(&self) -> EquivalenceProperties {
         self.input.equivalence_properties()
     }
 
+    /// 将上游数据分区发放到下游
     fn execute(
         &self,
         partition: usize,
@@ -355,28 +392,38 @@ impl ExecutionPlan for RepartitionExec {
             partition
         );
         // lock mutexes
+        // 该对象维护了分区的状态
         let mut state = self.state.lock();
 
+        // 上游数据来自于多少个分区
         let num_input_partitions = self.input.output_partitioning().partition_count();
+        // 输出会变成多少个分区
         let num_output_partitions = self.partitioning.partition_count();
 
         // if this is the first partition to be invoked then we need to set up initial state
+        // channels 对应分区 如果之前还未初始化相关属性  现在进行初始化
         if state.channels.is_empty() {
             // create one channel per *output* partition
             // note we use a custom channel that ensures there is always data for each receiver
             // but limits the amount of buffering if required.
+            // 根据输出的分区数 创建等量的channel
             let (txs, rxs) = channels(num_output_partitions);
+
             for (partition, (tx, rx)) in txs.into_iter().zip(rxs).enumerate() {
                 let reservation = Arc::new(Mutex::new(
                     MemoryConsumer::new(format!("RepartitionExec[{partition}]"))
                         .register(context.memory_pool()),
                 ));
+                // reservation用于记录每个分区的内存消耗的
                 state.channels.insert(partition, (tx, rx, reservation));
             }
 
             // launch one async task per *input* partition
+            // 根据输入的分区数
             let mut join_handles = Vec::with_capacity(num_input_partitions);
             for i in 0..num_input_partitions {
+
+                // 将每个输出分区相关的成员收集起来
                 let txs: HashMap<_, _> = state
                     .channels
                     .iter()
@@ -385,9 +432,11 @@ impl ExecutionPlan for RepartitionExec {
                     })
                     .collect();
 
+                // TODO 指标相关的先不管
                 let r_metrics = RepartitionMetrics::new(i, partition, &self.metrics);
 
                 let input_task: JoinHandle<Result<()>> =
+                // 产生一个拉取数据的后台任务  上游的数据被拆分后 会进入tx中 每个tx对应一个分区
                     tokio::spawn(Self::pull_from_input(
                         self.input.clone(),
                         i,
@@ -399,6 +448,7 @@ impl ExecutionPlan for RepartitionExec {
 
                 // In a separate task, wait for each input to be done
                 // (and pass along any errors, including panic!s)
+                // 这个任务是等待结果的
                 let join_handle = tokio::spawn(Self::wait_for_task(
                     AbortOnDropSingle::new(input_task),
                     txs.into_iter()
@@ -417,11 +467,13 @@ impl ExecutionPlan for RepartitionExec {
         );
 
         // now return stream for the specified *output* partition which will
-        // read from the channel
+        // 在启动异步任务后  调用该方法 返回下游接收该分区的receiver对象
         let (_tx, rx, reservation) = state
             .channels
             .remove(&partition)
             .expect("partition not used yet");
+
+        // 读取该流 就是通过内部的receiver接收数据
         Ok(Box::pin(RepartitionStream {
             num_input_partitions,
             num_input_partitions_processed: 0,
@@ -462,11 +514,12 @@ impl RepartitionExec {
     /// Create a new RepartitionExec
     pub fn try_new(
         input: Arc<dyn ExecutionPlan>,
-        partitioning: Partitioning,
+        partitioning: Partitioning,  // 采取的分区方案
     ) -> Result<Self> {
         Ok(RepartitionExec {
             input,
             partitioning,
+            // 初始化描述分区状态的对象
             state: Arc::new(Mutex::new(RepartitionExecState {
                 channels: HashMap::new(),
                 abort_helper: Arc::new(AbortOnDropMany::<()>(vec![])),
@@ -481,29 +534,33 @@ impl RepartitionExec {
     /// i is the input partition index
     ///
     /// txs hold the output sending channels for each output partition
+    /// 通过内部plan 拉取上游数据
     async fn pull_from_input(
-        input: Arc<dyn ExecutionPlan>,
-        i: usize,
+        input: Arc<dyn ExecutionPlan>,  // 用于获取上游数据
+        i: usize,    // 上游数据如果有被分区的话  i对应分区号
         mut txs: HashMap<
             usize,
-            (DistributionSender<MaybeBatch>, SharedMemoryReservation),
+            (DistributionSender<MaybeBatch>, SharedMemoryReservation),   // 存储下游分区数据的容器
         >,
-        partitioning: Partitioning,
+        partitioning: Partitioning,   // 决定如何分区
         r_metrics: RepartitionMetrics,
         context: Arc<TaskContext>,
     ) -> Result<()> {
+
+        // 根据分区算法创建分区对象
         let mut partitioner =
             BatchPartitioner::try_new(partitioning, r_metrics.repart_time.clone())?;
 
-        // execute the child operator
+        // execute the child operator      记录fetch时间
         let timer = r_metrics.fetch_time.timer();
+        // 执行内部计划 并得到数据流
         let mut stream = input.execute(i, context)?;
+        // fetch结束
         timer.done();
 
         // While there are still outputs to send to, keep
         // pulling inputs
         while !txs.is_empty() {
-            // fetch the next batch
             let timer = r_metrics.fetch_time.timer();
             let result = stream.next().await;
             timer.done();
@@ -511,9 +568,11 @@ impl RepartitionExec {
             // Input is done
             let batch = match result {
                 Some(result) => result?,
+                // 处理完所有数据了 返回
                 None => break,
             };
 
+            // partition_iter 会将上游获取到的batch 分成多份分发到下游
             for res in partitioner.partition_iter(batch)? {
                 let (partition, batch) = res?;
                 let size = batch.get_array_memory_size();
@@ -521,9 +580,13 @@ impl RepartitionExec {
                 let timer = r_metrics.send_time.timer();
                 // if there is still a receiver, send to it
                 if let Some((tx, reservation)) = txs.get_mut(&partition) {
+                    // 相当于记录的是管道的内存开销
                     reservation.lock().try_grow(size)?;
 
-                    if tx.send(Some(Ok(batch))).await.is_err() {
+                    // 发送数据
+                    if tx.send(Some(Ok(batch))).await
+                        // 当发送异常时 代表这个分区已经无效了 忽略发往该分区的数据
+                        .is_err() {
                         // If the other end has hung up, it was an early shutdown (e.g. LIMIT)
                         reservation.lock().shrink(size);
                         txs.remove(&partition);
@@ -546,13 +609,14 @@ impl RepartitionExec {
     /// complete. Upon error, propagates the errors to all output tx
     /// channels.
     async fn wait_for_task(
-        input_task: AbortOnDropSingle<Result<()>>,
-        txs: HashMap<usize, DistributionSender<Option<Result<RecordBatch>>>>,
+        input_task: AbortOnDropSingle<Result<()>>,   // 用于终止上游某个分区的拉取任务
+        txs: HashMap<usize, DistributionSender<Option<Result<RecordBatch>>>>,  // 对应下游接收数据的tx
     ) {
         // wait for completion, and propagate error
         // note we ignore errors on send (.ok) as that means the receiver has already shutdown.
         match input_task.await {
             // Error in joining task
+            // 上游任务失败时  要通知到下游
             Err(e) => {
                 let e = Arc::new(e);
 
@@ -575,8 +639,10 @@ impl RepartitionExec {
                 }
             }
             // Input task completed successfully
+            // 上游该分区的数据处理完毕后  发送None
             Ok(Ok(())) => {
                 // notify each output partition that this input partition has no more data
+                // 注意是发往所有分区
                 for (_, tx) in txs {
                     tx.send(None).await.ok();
                 }
@@ -585,8 +651,10 @@ impl RepartitionExec {
     }
 }
 
+// 重分区流  内部有接收者对应上游分发到该分区的数据
 struct RepartitionStream {
     /// Number of input partitions that will be sending batches to this output channel
+    /// 上游分区数
     num_input_partitions: usize,
 
     /// Number of input partitions that have finished sending batches to this output channel
@@ -595,14 +663,14 @@ struct RepartitionStream {
     /// Schema wrapped by Arc
     schema: SchemaRef,
 
-    /// channel containing the repartitioned batches
+    /// channel containing the repartitioned batches   对应某个分区数据的接收者
     input: DistributionReceiver<MaybeBatch>,
 
     /// Handle to ensure background tasks are killed when no longer needed.
     #[allow(dead_code)]
     drop_helper: Arc<AbortOnDropMany<()>>,
 
-    /// Memory reservation.
+    /// Memory reservation.   记录内存开销
     reservation: SharedMemoryReservation,
 }
 
@@ -614,8 +682,10 @@ impl Stream for RepartitionStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         loop {
+            // 对应发送到下游某个分区的管道
             match self.input.recv().poll_unpin(cx) {
                 Poll::Ready(Some(Some(v))) => {
+
                     if let Ok(batch) = &v {
                         self.reservation
                             .lock()
@@ -624,9 +694,11 @@ impl Stream for RepartitionStream {
 
                     return Poll::Ready(Some(v));
                 }
+                // None 是一种记号  代表某个分区数据已经发完
                 Poll::Ready(Some(None)) => {
                     self.num_input_partitions_processed += 1;
 
+                    // 当所有分区数据都发送完毕后  满足条件
                     if self.num_input_partitions == self.num_input_partitions_processed {
                         // all input partitions have finished sending batches
                         return Poll::Ready(None);

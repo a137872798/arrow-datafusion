@@ -712,6 +712,7 @@ impl ParquetFileReaderFactory for DefaultParquetFileReaderFactory {
 }
 
 /// Executes a query and writes the results to a partitioned Parquet file.
+/// 执行plan 将结果作用到parquet文件上
 pub async fn plan_to_parquet(
     task_ctx: Arc<TaskContext>,
     plan: Arc<dyn ExecutionPlan>,

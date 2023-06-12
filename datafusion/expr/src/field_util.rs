@@ -27,15 +27,21 @@ use datafusion_common::{DataFusionError, Result, ScalarValue};
 /// * there is no field key is not of the required index type
 pub fn get_indexed_field(data_type: &DataType, key: &ScalarValue) -> Result<Field> {
     match (data_type, key) {
+
+        // 列表类型 List是arrow的一个复合类型   只允许使用Int64寻址
         (DataType::List(lt), ScalarValue::Int64(Some(i))) => {
+            // 取出列表内部的类型
             Ok(Field::new(i.to_string(), lt.data_type().clone(), true))
         }
+
+        // 结构体也是复合类型 通过string读取内部某个列
         (DataType::Struct(fields), ScalarValue::Utf8(Some(s))) => {
             if s.is_empty() {
                 Err(DataFusionError::Plan(
                     "Struct based indexed access requires a non empty string".to_string(),
                 ))
             } else {
+                // 通过name检索
                 let field = fields.iter().find(|f| f.name() == s);
                 match field {
                     None => Err(DataFusionError::Plan(format!(
@@ -45,6 +51,7 @@ pub fn get_indexed_field(data_type: &DataType, key: &ScalarValue) -> Result<Fiel
                 }
             }
         }
+        // 其他情况代表不是复合类型 或者索引类型出错
         (DataType::Struct(_), _) => Err(DataFusionError::Plan(
             "Only utf8 strings are valid as an indexed field in a struct".to_string(),
         )),

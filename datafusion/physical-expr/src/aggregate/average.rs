@@ -42,14 +42,14 @@ use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::Accumulator;
 use datafusion_row::accessor::RowAccessor;
 
-/// AVG aggregate expression
+/// AVG aggregate expression    数据聚合即是计算平均数
 #[derive(Debug, Clone)]
 pub struct Avg {
     name: String,
     expr: Arc<dyn PhysicalExpr>,
-    pub sum_data_type: DataType,
-    rt_data_type: DataType,
-    pub pre_cast_to_sum_type: bool,
+    pub sum_data_type: DataType,  // 求和后的数据类型
+    rt_data_type: DataType,   // 平均数的数据类型
+    pub pre_cast_to_sum_type: bool,  // 注意平均数有这个参数
 }
 
 impl Avg {
@@ -95,6 +95,7 @@ impl AggregateExpr for Avg {
         self
     }
 
+    /// rt_data_type 对应结果的数据类型
     fn field(&self) -> Result<Field> {
         Ok(Field::new(&self.name, self.rt_data_type.clone(), true))
     }
@@ -107,6 +108,7 @@ impl AggregateExpr for Avg {
         )?))
     }
 
+    // 计算平均数需要的状态是 数量和sum  这样才好借助另一个对象的状态计算 直接保存平均数没什么意义
     fn state_fields(&self) -> Result<Vec<Field>> {
         Ok(vec![
             Field::new(
@@ -179,10 +181,10 @@ impl PartialEq<dyn Any> for Avg {
 #[derive(Debug)]
 pub struct AvgAccumulator {
     // sum is used for null
-    sum: ScalarValue,
+    sum: ScalarValue,   // 总数值
     sum_data_type: DataType,
     return_data_type: DataType,
-    count: u64,
+    count: u64,   // 总数
 }
 
 impl AvgAccumulator {
@@ -205,6 +207,7 @@ impl Accumulator for AvgAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         let values = &values[0];
 
+        // 除开null值
         self.count += (values.len() - values.null_count()) as u64;
         self.sum = self
             .sum
@@ -212,6 +215,7 @@ impl Accumulator for AvgAccumulator {
         Ok(())
     }
 
+    // supports_bounded_execution 为true时 需要实现该方法   支持回收对象 这样可以释放内存
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         let values = &values[0];
         self.count -= (values.len() - values.null_count()) as u64;
@@ -232,6 +236,7 @@ impl Accumulator for AvgAccumulator {
         Ok(())
     }
 
+    // 计算平均值
     fn evaluate(&self) -> Result<ScalarValue> {
         match self.sum {
             ScalarValue::Float64(e) => {

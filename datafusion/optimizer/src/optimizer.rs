@@ -54,9 +54,11 @@ use std::time::Instant;
 /// computes the same results, but in a potentially more efficient
 /// way. If there are no suitable transformations for the input plan,
 /// the optimizer can simply return it as is.
+/// 优化规则对象
 pub trait OptimizerRule {
     /// Try and rewrite `plan` to an optimized form, returning None if the plan cannot be
     /// optimized by this rule.
+    /// 尝试对逻辑计划进行优化
     fn try_optimize(
         &self,
         plan: &LogicalPlan,
@@ -69,12 +71,14 @@ pub trait OptimizerRule {
     /// How should the rule be applied by the optimizer? See comments on [`ApplyOrder`] for details.
     ///
     /// If a rule use default None, it should traverse recursively plan inside itself
+    /// 描述优化器是如何作用到执行计划上的  上至下还是下至上
     fn apply_order(&self) -> Option<ApplyOrder> {
         None
     }
 }
 
 /// Options to control the DataFusion Optimizer.
+/// 优化器配置
 pub trait OptimizerConfig {
     /// Return the time at which the query execution started. This
     /// time is used as the value for now()
@@ -85,19 +89,24 @@ pub trait OptimizerConfig {
 
 /// A standalone [`OptimizerConfig`] that can be used independently
 /// of DataFusion's config management
+/// 优化器上下文
 #[derive(Debug)]
 pub struct OptimizerContext {
     /// Query execution start time that can be used to rewrite
     /// expressions such as `now()` to use a literal value instead
+    /// 查询开始时间
     query_execution_start_time: DateTime<Utc>,
 
+    /// 内部包含各种配置
     options: ConfigOptions,
 }
 
+/// 优化器上下文
 impl OptimizerContext {
     /// Create optimizer config
     pub fn new() -> Self {
         let mut options = ConfigOptions::default();
+        // 代表会追加一个过滤器  用于过滤join key为空的记录
         options.optimizer.filter_null_join_keys = true;
 
         Self {
@@ -107,6 +116,7 @@ impl OptimizerContext {
     }
 
     /// Specify whether to enable the filter_null_keys rule
+    /// 更改优化器的选项
     pub fn filter_null_keys(mut self, filter_null_keys: bool) -> Self {
         self.options.optimizer.filter_null_join_keys = filter_null_keys;
         self
@@ -124,12 +134,14 @@ impl OptimizerContext {
 
     /// Specify whether the optimizer should skip rules that produce
     /// errors, or fail the query
+    /// 当出现异常时  是否应该忽略 或者查询失败
     pub fn with_skip_failing_rules(mut self, b: bool) -> Self {
         self.options.optimizer.skip_failed_rules = b;
         self
     }
 
     /// Specify how many times to attempt to optimize the plan
+    /// 尝试优化的次数
     pub fn with_max_passes(mut self, v: u8) -> Self {
         self.options.optimizer.max_passes = v as usize;
         self
@@ -154,6 +166,7 @@ impl OptimizerConfig for OptimizerContext {
 }
 
 /// A rule-based optimizer.
+/// 基于某些规则优化执行计划
 #[derive(Clone)]
 pub struct Optimizer {
     /// All optimizer rules to apply
@@ -194,7 +207,9 @@ pub struct Optimizer {
 /// }
 /// ```
 pub enum ApplyOrder {
+    // 顶向下
     TopDown,
+    // 底向上
     BottomUp,
 }
 
@@ -206,6 +221,7 @@ impl Default for Optimizer {
 
 impl Optimizer {
     /// Create a new optimizer using the recommended list of rules
+    /// 优化器在初始化后 就会内置很多的优化规则
     pub fn new() -> Self {
         let rules: Vec<Arc<dyn OptimizerRule + Sync + Send>> = vec![
             Arc::new(SimplifyExpressions::new()),
@@ -254,37 +270,44 @@ impl Optimizer {
 
     /// Optimizes the logical plan by applying optimizer rules, and
     /// invoking observer function after each call
+    /// 通过优化规则优化logicalPlan
     pub fn optimize<F>(
         &self,
         plan: &LogicalPlan,
-        config: &dyn OptimizerConfig,
-        mut observer: F,
+        config: &dyn OptimizerConfig,   // 优化器配置
+        mut observer: F,   // 在每次调用优化规则后都会触发一次该方法
     ) -> Result<LogicalPlan>
     where
         F: FnMut(&LogicalPlan, &dyn OptimizerRule),
     {
+        // 内部包含各种选项
         let options = config.options();
         let mut new_plan = plan.clone();
 
         let start_time = Instant::now();
 
         let mut previous_plans = HashSet::with_capacity(16);
+        // 为plan生成编号后 存入previous_plans
         previous_plans.insert(LogicalPlanSignature::new(&new_plan));
 
         let mut i = 0;
         while i < options.optimizer.max_passes {
             log_plan(&format!("Optimizer input (pass {i})"), &new_plan);
 
+            // 遍历内部所有规则进行优化
             for rule in &self.rules {
+                // 对逻辑计划进行递归的优化
                 let result = self.optimize_recursively(rule, &new_plan, config);
 
                 match result {
                     Ok(Some(plan)) => {
+                        // 确保schema前后一致
                         assert_schema_is_the_same(rule.name(), &new_plan, &plan)?;
                         new_plan = plan;
                         observer(&new_plan, rule.as_ref());
                         log_plan(rule.name(), &new_plan);
                     }
+                    // 代表该优化规则无法作用于本对象
                     Ok(None) => {
                         observer(&new_plan, rule.as_ref());
                         debug!(
@@ -320,6 +343,7 @@ impl Optimizer {
             log_plan(&format!("Optimized plan (pass {i})"), &new_plan);
 
             // HashSet::insert returns, whether the value was newly inserted.
+            // 每一轮的优化结果都会存在set中  因为每次num不一样 不会覆盖
             let plan_is_fresh =
                 previous_plans.insert(LogicalPlanSignature::new(&new_plan));
             if !plan_is_fresh {
@@ -334,6 +358,7 @@ impl Optimizer {
         Ok(new_plan)
     }
 
+    // 优化逻辑计划
     fn optimize_node(
         &self,
         rule: &Arc<dyn OptimizerRule + Send + Sync>,
@@ -344,21 +369,26 @@ impl Optimizer {
         rule.try_optimize(plan, config)
     }
 
+    // 对输入进行优化
     fn optimize_inputs(
         &self,
         rule: &Arc<dyn OptimizerRule + Send + Sync>,
         plan: &LogicalPlan,
         config: &dyn OptimizerConfig,
     ) -> Result<Option<LogicalPlan>> {
+        // plan支持嵌套 这里是处理内部的plan
         let inputs = plan.inputs();
         let result = inputs
             .iter()
             .map(|sub_plan| self.optimize_recursively(rule, sub_plan, config))
             .collect::<Result<Vec<_>>>()?;
+
+        // 代表优化失败
         if result.is_empty() || result.iter().all(|o| o.is_none()) {
             return Ok(None);
         }
 
+        // 优化成功 替换原plan内部的对象
         let new_inputs = result
             .into_iter()
             .enumerate()
@@ -373,6 +403,7 @@ impl Optimizer {
 
     /// Use a rule to optimize the whole plan.
     /// If the rule with `ApplyOrder`, we don't need to recursively handle children in rule.
+    /// 使用rule进行优化
     pub fn optimize_recursively(
         &self,
         rule: &Arc<dyn OptimizerRule + Send + Sync>,
@@ -382,7 +413,9 @@ impl Optimizer {
         match rule.apply_order() {
             Some(order) => match order {
                 ApplyOrder::TopDown => {
+                    // 触发优化器的 try_optimize
                     let optimize_self_opt = self.optimize_node(rule, plan, config)?;
+                    // 返回None代表优化失败
                     let optimize_inputs_opt = match &optimize_self_opt {
                         Some(optimized_plan) => {
                             self.optimize_inputs(rule, optimized_plan, config)?
@@ -391,6 +424,8 @@ impl Optimizer {
                     };
                     Ok(optimize_inputs_opt.or(optimize_self_opt))
                 }
+
+                // 自底向上优化 先从内部input开始
                 ApplyOrder::BottomUp => {
                     let optimize_inputs_opt = self.optimize_inputs(rule, plan, config)?;
                     let optimize_self_opt = match &optimize_inputs_opt {
@@ -402,6 +437,7 @@ impl Optimizer {
                     Ok(optimize_self_opt.or(optimize_inputs_opt))
                 }
             },
+            // 按照默认策略 直接优化plan
             _ => rule.try_optimize(plan, config),
         }
     }

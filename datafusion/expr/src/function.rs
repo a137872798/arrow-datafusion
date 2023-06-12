@@ -36,20 +36,24 @@ use std::sync::Arc;
 /// will be passed. In that case the single element is a null array to indicate
 /// the batch's row count (so that the generative zero-argument function can know
 /// the result array size).
+/// 接收一组参数列 产生一个结果列
 pub type ScalarFunctionImplementation =
     Arc<dyn Fn(&[ColumnarValue]) -> Result<ColumnarValue> + Send + Sync>;
 
 /// Factory that returns the functions's return type given the input argument types
+/// 可以用于推断返回结果类型
 pub type ReturnTypeFunction =
     Arc<dyn Fn(&[DataType]) -> Result<Arc<DataType>> + Send + Sync>;
 
 /// Factory that returns an accumulator for the given aggregate, given
 /// its return datatype.
+/// 产生类型对应的累加器
 pub type AccumulatorFunctionImplementation =
     Arc<dyn Fn(&DataType) -> Result<Box<dyn Accumulator>> + Send + Sync>;
 
 /// Factory that returns the types used by an aggregator to serialize
 /// its state, given its return datatype.
+/// 在聚合函数中使用
 pub type StateTypeFunction =
     Arc<dyn Fn(&DataType) -> Result<Arc<Vec<DataType>>> + Send + Sync>;
 
@@ -72,6 +76,7 @@ macro_rules! make_utf8_to_return_type {
     };
 }
 
+// 通过宏产生2个函数  当返回utf8类型时 自动进行转换
 make_utf8_to_return_type!(utf8_to_str_type, DataType::LargeUtf8, DataType::Utf8);
 make_utf8_to_return_type!(utf8_to_int_type, DataType::Int64, DataType::Int32);
 
@@ -92,6 +97,7 @@ fn utf8_or_binary_to_binary_type(arg_type: &DataType, name: &str) -> Result<Data
 }
 
 /// Returns the datatype of the scalar function
+/// 根据参数类型 推断内建函数的返回类型
 pub fn return_type(
     fun: &BuiltinScalarFunction,
     input_expr_types: &[DataType],
@@ -99,6 +105,7 @@ pub fn return_type(
     // Note that this function *must* return the same type that the respective physical expression returns
     // or the execution panics.
 
+    // 参数非法
     if input_expr_types.is_empty() && !fun.supports_zero_argument() {
         return Err(DataFusionError::Internal(format!(
             "Builtin scalar function {fun} does not support empty arguments"
@@ -106,19 +113,25 @@ pub fn return_type(
     }
 
     // verify that this is a valid set of data types for this function
+    // 校验传入的参数是否满足签名
     data_types(input_expr_types, &signature(fun))?;
 
     // the return type of the built in function.
     // Some built-in functions' return type depends on the incoming type.
     match fun {
+        // 上面已经根据函数类型 校验过参数了 所以这里直接用就好
         BuiltinScalarFunction::MakeArray => Ok(DataType::FixedSizeList(
+            // arrow的list 就是内部有个field类型  代表元素类型
             Arc::new(Field::new("item", input_expr_types[0].clone(), true)),
             input_expr_types.len() as i32,
         )),
         BuiltinScalarFunction::Ascii => Ok(DataType::Int32),
+
+        // 判断占用多少位  发现utf-8类型 返回int类型
         BuiltinScalarFunction::BitLength => {
             utf8_to_int_type(&input_expr_types[0], "bit_length")
         }
+
         BuiltinScalarFunction::Btrim => utf8_to_str_type(&input_expr_types[0], "btrim"),
         BuiltinScalarFunction::CharacterLength => {
             utf8_to_int_type(&input_expr_types[0], "character_length")
@@ -156,6 +169,8 @@ pub fn return_type(
         BuiltinScalarFunction::InitCap => {
             utf8_to_str_type(&input_expr_types[0], "initcap")
         }
+
+        // 返回的都是str类型
         BuiltinScalarFunction::Left => utf8_to_str_type(&input_expr_types[0], "left"),
         BuiltinScalarFunction::Lower => utf8_to_str_type(&input_expr_types[0], "lower"),
         BuiltinScalarFunction::Lpad => utf8_to_str_type(&input_expr_types[0], "lpad"),
@@ -309,6 +324,7 @@ pub fn return_type(
 }
 
 /// the signatures supported by the function `fun`.
+/// 返回内建函数的参数列表  这些都是硬逻辑
 pub fn signature(fun: &BuiltinScalarFunction) -> Signature {
     // note: the physical expression must accept the type returned by this function or the execution panics.
 

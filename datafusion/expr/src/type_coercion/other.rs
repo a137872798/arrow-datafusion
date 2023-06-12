@@ -37,6 +37,7 @@ pub fn get_coerce_type_for_list(
 /// Find a common coerceable type for all `when_or_then_types` as well
 /// and the `case_or_else_type`, if specified.
 /// Returns the common data type for `when_or_then_types` and `case_or_else_type`
+/// 判断最终的类型
 pub fn get_coerce_type_for_case_expression(
     when_or_then_types: &[DataType],
     case_or_else_type: Option<&DataType>,
@@ -45,6 +46,8 @@ pub fn get_coerce_type_for_case_expression(
         None => when_or_then_types[0].clone(),
         Some(data_type) => data_type.clone(),
     };
+
+    // 会返回兼容所有情况的类型
     when_or_then_types
         .iter()
         .fold(Some(case_or_else_type), |left, right_type| match left {

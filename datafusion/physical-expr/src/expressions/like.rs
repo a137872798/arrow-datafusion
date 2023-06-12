@@ -34,10 +34,12 @@ use arrow::compute::kernels::comparison::{
     ilike_utf8_scalar, like_utf8_scalar, nilike_utf8_scalar, nlike_utf8_scalar,
 };
 
-// Like expression
+// Like expression   like表达式
 #[derive(Debug)]
 pub struct LikeExpr {
+    // 结果是否要取反
     negated: bool,
+    // 是否大小写敏感
     case_insensitive: bool,
     expr: Arc<dyn PhysicalExpr>,
     pattern: Arc<dyn PhysicalExpr>,
@@ -83,6 +85,7 @@ impl LikeExpr {
         match (self.negated, self.case_insensitive) {
             (false, false) => "LIKE",
             (true, false) => "NOT LIKE",
+            // ILIKE 代表忽略大小写
             (false, true) => "ILIKE",
             (true, true) => "NOT ILIKE",
         }
@@ -111,6 +114,8 @@ impl PhysicalExpr for LikeExpr {
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         let expr_value = self.expr.evaluate(batch)?;
         let pattern_value = self.pattern.evaluate(batch)?;
+
+        // 结果类型
         let expr_data_type = expr_value.data_type();
         let pattern_data_type = pattern_value.data_type();
 
@@ -120,7 +125,7 @@ impl PhysicalExpr for LikeExpr {
             &pattern_value,
             &pattern_data_type,
         ) {
-            // Types are equal => valid
+            // Types are equal => valid   需要确保结果类型是一致的
             (_, l, _, r) if l == r => {}
             // Allow comparing a dictionary value with its corresponding scalar value
             (
@@ -147,12 +152,14 @@ impl PhysicalExpr for LikeExpr {
 
         // Attempt to use special kernels if one input is scalar and the other is an array
         let scalar_result = match (&expr_value, &pattern_value) {
+            // 如果一个是array 一个是scalar 进行评估
             (ColumnarValue::Array(array), ColumnarValue::Scalar(scalar)) => {
                 self.evaluate_array_scalar(array, scalar)?
             }
             (_, _) => None, // default to array implementation
         };
 
+        // 如果在上一步产生了结果 直接返回
         if let Some(result) = scalar_result {
             return result.map(|a| ColumnarValue::Array(a));
         }
@@ -162,6 +169,7 @@ impl PhysicalExpr for LikeExpr {
             expr_value.into_array(batch.num_rows()),
             pattern_value.into_array(batch.num_rows()),
         );
+        // 评估2个数组数据 是否满足条件 返回评估结果
         self.evaluate_array_array(expr, pattern)
             .map(|a| ColumnarValue::Array(a))
     }
@@ -183,6 +191,7 @@ impl PhysicalExpr for LikeExpr {
     }
 
     /// Return the boundaries of this binary expression's result.
+    /// 代表无法推算出结果
     fn analyze(&self, context: AnalysisContext) -> AnalysisContext {
         context.with_boundaries(None)
     }
@@ -203,8 +212,12 @@ impl PartialEq<dyn Any> for LikeExpr {
 }
 
 macro_rules! binary_string_array_op_scalar {
+    // 对应左值，右值，操作，操作类型
     ($LEFT:expr, $RIGHT:expr, $OP:ident, $OP_TYPE:expr) => {{
+
+        // 产生一个右侧的数组
         let result: Result<Arc<dyn Array>> = match $LEFT.data_type() {
+            // 根据内部元素的数据类型 走不同逻辑
             DataType::Utf8 => compute_utf8_op_scalar!($LEFT, $RIGHT, $OP, StringArray, $OP_TYPE),
             DataType::LargeUtf8 => compute_utf8_op_scalar!($LEFT, $RIGHT, $OP, LargeStringArray, $OP_TYPE),
             other => Err(DataFusionError::Internal(format!(
@@ -218,7 +231,7 @@ macro_rules! binary_string_array_op_scalar {
 
 impl LikeExpr {
     /// Evaluate the expression if the input is an array and
-    /// pattern is literal - use scalar operations
+    /// pattern is literal - use scalar operations    参数分别是数组和标量的时候 进行评估
     fn evaluate_array_scalar(
         &self,
         array: &dyn Array,
@@ -253,6 +266,7 @@ impl LikeExpr {
         Ok(scalar_result)
     }
 
+    // 评估2个数组的数据
     fn evaluate_array_array(
         &self,
         left: Arc<dyn Array>,
@@ -268,6 +282,7 @@ impl LikeExpr {
 }
 
 /// Create a like expression, erroring if the argument types are not compatible.
+/// 在expr外包装一层  追加like的功能
 pub fn like(
     negated: bool,
     case_insensitive: bool,
